@@ -1,0 +1,19 @@
+# 可重建的检索缓存与运行锁
+memory/.index.sqlite
+memory/.index.sqlite-*
+memory/.write.lock
+
+# 本地凭据和环境
+.mem_api_key
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 独立的 SQLite MCP 服务及其压缩包不属于 Markdown 方案
+/shared-memory-*/
+/shared-memory-*.zip
