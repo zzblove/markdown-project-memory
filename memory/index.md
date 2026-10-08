@@ -9,3 +9,5 @@
 - Markdown 方案 Git 发布边界 — `memory/decisions/2026-10-08-0913-Markdown 方案 Git 发布边界-de34c873.md` — 发布协议、脚本与 Markdown，排除缓存、凭据及独立服务包
 
 - Markdown 方案 GitHub 发布位置 — `memory/facts/2026-10-08-0921-Markdown 方案 GitHub 发布位置-ff5a7956.md` — zzblove 私有仓库 markdown-project-memory，main 分支同步 Markdown
+
+- Windows 短路径造成记忆更正断链的修复 — `memory/howto/2026-10-08-0924-Windows 短路径造成记忆更正断链的修复-d5e6d470.md` — 统一真实路径身份并验证短路径与目录链接，避免更正关系失效

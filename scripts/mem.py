@@ -22,10 +22,11 @@ import urllib.error
 import urllib.request
 import uuid
 
-VERSION = '2.1.0'
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-MEM_DIR = os.path.abspath(os.environ.get('MEMORY_DIR', os.path.join(ROOT, 'memory')))
+VERSION = '2.1.1'
+# 使用同一规范路径，避免 Windows 8.3 短路径或目录链接破坏相对更正关系。
+HERE = str(Path(__file__).resolve().parent)
+ROOT = str(Path(HERE).parent)
+MEM_DIR = str(Path(os.environ.get('MEMORY_DIR', os.path.join(ROOT, 'memory'))).resolve())
 DB_PATH = os.path.join(MEM_DIR, '.index.sqlite')
 BASE_URL = os.environ.get('MEMORY_BASE_URL', 'https://api.siliconflow.cn/v1').rstrip('/')
 EMBED_MODEL = os.environ.get('MEMORY_EMBED_MODEL', 'BAAI/bge-m3')

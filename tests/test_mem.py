@@ -115,6 +115,37 @@ class MemoryTests(unittest.TestCase):
         self.assertIn('  ' + old + '  ', history)
         self.assertIn('  ' + new + '  ', history)
 
+    def test_alias_paths_keep_correction_links_canonical(self):
+        if os.name == 'nt':
+            import ctypes
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.windll.kernel32.GetShortPathNameW(str(self.script), buffer, len(buffer))
+            if not length or buffer.value == str(self.script):
+                self.skipTest('Windows short paths unavailable on this volume')
+            alias_script = Path(buffer.value)
+        else:
+            alias_root = self.root / 'project-alias'
+            alias_root.symlink_to(self.root, target_is_directory=True)
+            alias_script = alias_root / 'scripts' / 'mem.py'
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith('MEMORY_')}
+        environment['MEMORY_DIR'] = str(alias_script.parent.parent / 'memory')
+        with mock.patch.dict(os.environ, environment, clear=True):
+            spec = importlib.util.spec_from_file_location('alias_mem', alias_script)
+            alias = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(alias)
+        self.assertEqual(alias.ROOT, str(self.root.resolve()))
+        self.assertEqual(alias.MEM_DIR, str((self.root / 'memory').resolve()))
+        body = self.root / 'alias-body.txt'
+        body.write_text('AliasMarker verified deployment.', encoding='utf-8')
+        old, _, _ = self.capture(alias.cmd_add, 'fact', 'Alias environment', 'Initial', str(body))
+        new, _, _ = self.capture(alias.cmd_add, 'correction', 'Alias environment', 'Updated', str(body), old)
+        self.assertEqual(alias.documents()[new]['supersedes'], [old])
+        with mock.patch.object(alias, 'post', side_effect=AssertionError('External API forbidden')):
+            _, output, _ = self.capture(alias.cmd_search, 'AliasMarker')
+        self.assertIn('  ' + new + '  ', output)
+        self.assertNotIn('  ' + old + '  ', output)
+
     def test_stale_index_search_reads_latest_markdown_without_api(self):
         path = self.add()
         self.index()

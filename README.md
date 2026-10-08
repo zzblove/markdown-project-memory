@@ -1,6 +1,6 @@
 # Markdown 项目共享记忆
 
-用 Markdown 保存项目的长期结论，让同一项目中的 AI agent 能检索、核对和补充已有知识。Markdown 是事实源，SQLite 只保存可重建的语义检索缓存。工具版本为 `2.1.0`，仅依赖 Python 标准库。
+用 Markdown 保存项目的长期结论，让同一项目中的 AI agent 能检索、核对和补充已有知识。Markdown 是事实源，SQLite 只保存可重建的语义检索缓存。工具版本为 `2.1.1`，仅依赖 Python 标准库。
 
 适合记录技术决策、环境约束和解决复杂问题的完整步骤。它不自动保存聊天全文；agent 按 `AGENTS.md` 协议主动读写。不同机器或 worktree 通过 Git 同步 Markdown，各自重建检索缓存。
 
