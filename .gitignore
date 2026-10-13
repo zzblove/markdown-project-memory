@@ -17,3 +17,4 @@ venv/
 # 独立的 SQLite MCP 服务及其压缩包不属于 Markdown 方案
 /shared-memory-*/
 /shared-memory-*.zip
+scripts/.mem_api_key
