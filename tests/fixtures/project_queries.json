@@ -1,0 +1,430 @@
+{
+  "schema_version": 1,
+  "description": "人工核对实际 Markdown 的中文问题集；非合成文档夹具，非全面准确率结论。",
+  "cases": [
+    {
+      "id": "service-summary",
+      "query": "独立共享记忆服务如何防止摘要被旧结果覆盖",
+      "expected": [
+        "memory/decisions/2026-10-07-2320-共享记忆服务修复方案-ff04b19a.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-07-2320-共享记忆服务修复方案-ff04b19a.md": {
+          "body_sha256": "cbf1ab1cb720f5ffd6155fa1940ca65e7010f9d0d7d2942a4d1e1397bab67a22",
+          "contains": [
+            "版本条件写入"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "service-background",
+      "query": "独立 MCP 服务外部嵌入之前是否先保存原文",
+      "expected": [
+        "memory/decisions/2026-10-07-2320-共享记忆服务修复方案-ff04b19a.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-07-2320-共享记忆服务修复方案-ff04b19a.md": {
+          "body_sha256": "cbf1ab1cb720f5ffd6155fa1940ca65e7010f9d0d7d2942a4d1e1397bab67a22",
+          "contains": [
+            "原文先保存"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "service-environment",
+      "query": "独立共享记忆服务修复用什么 Python 和 SQLite 版本",
+      "expected": [
+        "memory/facts/2026-10-07-2347-共享记忆服务修复验证环境-9c2bdd9f.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-07-2347-共享记忆服务修复验证环境-9c2bdd9f.md": {
+          "body_sha256": "4401ad73b0cbb75c1154469c6fad63a8fa21121374c4574773b190c5f32ba64d",
+          "contains": [
+            "Python 3.11.5、SQLite 3.41.2"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "service-tests",
+      "query": "共享记忆服务修复当时通过了多少测试",
+      "expected": [
+        "memory/facts/2026-10-07-2347-共享记忆服务修复验证环境-9c2bdd9f.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-07-2347-共享记忆服务修复验证环境-9c2bdd9f.md": {
+          "body_sha256": "4401ad73b0cbb75c1154469c6fad63a8fa21121374c4574773b190c5f32ba64d",
+          "contains": [
+            "完整回归 39 项通过"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "publish-exclusions",
+      "query": "Git 发布哪些记忆内容，哪些缓存不能上传",
+      "expected": [
+        "memory/decisions/2026-10-08-0913-Markdown 方案 Git 发布边界-de34c873.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-08-0913-Markdown 方案 Git 发布边界-de34c873.md": {
+          "body_sha256": "64ee1ce0a0aad1b24c4f93d3d7348de0e477b8bba9bf032630ca488ecd32bc82",
+          "contains": [
+            "SQLite 检索缓存、写锁、API key"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "publish-service",
+      "query": "独立 SQLite MCP 服务目录和压缩包是否包含在仓库",
+      "expected": [
+        "memory/decisions/2026-10-08-0913-Markdown 方案 Git 发布边界-de34c873.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-08-0913-Markdown 方案 Git 发布边界-de34c873.md": {
+          "body_sha256": "64ee1ce0a0aad1b24c4f93d3d7348de0e477b8bba9bf032630ca488ecd32bc82",
+          "contains": [
+            "独立服务是另一套部署方案"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "visibility",
+      "query": "仓库现在是公开还是私有",
+      "expected": [
+        "memory/facts/2026-10-08-1037-更正：Markdown 方案仓库改为公开-35840c0e.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-08-1037-更正：Markdown 方案仓库改为公开-35840c0e.md": {
+          "body_sha256": "15ae87fd36ab2d3986c3a77a9adafb6975371ec48a15103b63c3a77879f36e5d",
+          "contains": [
+            "已调整为 PUBLIC"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。",
+      "forbidden": [
+        "memory/facts/2026-10-08-0921-Markdown 方案 GitHub 发布位置-ff5a7956.md"
+      ]
+    },
+    {
+      "id": "sync",
+      "query": "不同机器如何同步 Markdown 记忆和检索缓存",
+      "expected": [
+        "memory/facts/2026-10-08-1037-更正：Markdown 方案仓库改为公开-35840c0e.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-08-1037-更正：Markdown 方案仓库改为公开-35840c0e.md": {
+          "body_sha256": "15ae87fd36ab2d3986c3a77a9adafb6975371ec48a15103b63c3a77879f36e5d",
+          "contains": [
+            "由 Git 同步，各机器的检索缓存分别重建"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "windows-alias",
+      "query": "Windows 8.3 短路径造成 supersedes 更正断链怎么修",
+      "expected": [
+        "memory/howto/2026-10-08-0924-Windows 短路径造成记忆更正断链的修复-d5e6d470.md"
+      ],
+      "evidence": {
+        "memory/howto/2026-10-08-0924-Windows 短路径造成记忆更正断链的修复-d5e6d470.md": {
+          "body_sha256": "52c163a6a8345140cc18916e8b2053097086883ece74397e4d784eaa5b9ca92c",
+          "contains": [
+            "统一解析脚本目录、项目根及 MEMORY_DIR 的真实绝对路径"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "linux-alias",
+      "query": "Linux 符号链接访问记忆为什么也要统一路径身份",
+      "expected": [
+        "memory/howto/2026-10-08-0924-Windows 短路径造成记忆更正断链的修复-d5e6d470.md"
+      ],
+      "evidence": {
+        "memory/howto/2026-10-08-0924-Windows 短路径造成记忆更正断链的修复-d5e6d470.md": {
+          "body_sha256": "52c163a6a8345140cc18916e8b2053097086883ece74397e4d784eaa5b9ca92c",
+          "contains": [
+            "Linux 项目通过目录符号链接访问时也需要统一路径身份"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "kit-boundary",
+      "query": "短路径修复当时为何需要先比较全局工具包版本",
+      "expected": [
+        "memory/howto/2026-10-08-0924-Windows 短路径造成记忆更正断链的修复-d5e6d470.md"
+      ],
+      "evidence": {
+        "memory/howto/2026-10-08-0924-Windows 短路径造成记忆更正断链的修复-d5e6d470.md": {
+          "body_sha256": "52c163a6a8345140cc18916e8b2053097086883ece74397e4d784eaa5b9ca92c",
+          "contains": [
+            "安装副本没有同步"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "author-scope",
+      "query": "多 agent 共享知识能按作者分隔吗",
+      "expected": [
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md": {
+          "body_sha256": "dc138cabb077e824c17e656d39a9ca7896332fdcae95eafbd02fb2e0a803d21f",
+          "contains": [
+            "不以作者分隔公共知识"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "no-local-llm",
+      "query": "共享记忆优化为什么不用本地大模型或独立向量数据库",
+      "expected": [
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md": {
+          "body_sha256": "dc138cabb077e824c17e656d39a9ca7896332fdcae95eafbd02fb2e0a803d21f",
+          "contains": [
+            "本次不引入本地大模型、额外向量数据库"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "evidence",
+      "query": "引用记忆中的数字路径限制条件前应核对什么",
+      "expected": [
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md": {
+          "body_sha256": "dc138cabb077e824c17e656d39a9ca7896332fdcae95eafbd02fb2e0a803d21f",
+          "contains": [
+            "数字、路径、限制条件以原文为准"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "concurrency",
+      "query": "同目录 agent 怎样避免并发重复写入",
+      "expected": [
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md": {
+          "body_sha256": "dc138cabb077e824c17e656d39a9ca7896332fdcae95eafbd02fb2e0a803d21f",
+          "contains": [
+            "去重检查与发布置于同一进程间写锁"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "eval-limit",
+      "query": "35 项回归和 36 条查询代表真实模型准确率吗",
+      "expected": [
+        "memory/facts/2026-10-13-1106-2.2.0 共享记忆优化验证环境-629686de.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-13-1106-2.2.0 共享记忆优化验证环境-629686de.md": {
+          "body_sha256": "790bcf74f2a8d640554f8346631bc0fff70e1568e5ec6008251984dbeb6d8757",
+          "contains": [
+            "不是生产嵌入模型准确率"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "cross-root-tests",
+      "query": "2.2.0 验证包含跨工作目录共用 MEMORY_DIR 吗",
+      "expected": [
+        "memory/facts/2026-10-13-1106-2.2.0 共享记忆优化验证环境-629686de.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-13-1106-2.2.0 共享记忆优化验证环境-629686de.md": {
+          "body_sha256": "790bcf74f2a8d640554f8346631bc0fff70e1568e5ec6008251984dbeb6d8757",
+          "contains": [
+            "不同工作目录共用 MEMORY_DIR"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "cli-environment",
+      "query": "2.2.0 第一版优化在哪个环境验证",
+      "expected": [
+        "memory/facts/2026-10-13-1106-2.2.0 共享记忆优化验证环境-629686de.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-13-1106-2.2.0 共享记忆优化验证环境-629686de.md": {
+          "body_sha256": "790bcf74f2a8d640554f8346631bc0fff70e1568e5ec6008251984dbeb6d8757",
+          "contains": [
+            "Windows、Python 3.11.5、SQLite 3.41.2"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "merge-current",
+      "query": "2.2.0 PR 现在还是草稿未合并吗",
+      "expected": [
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md": {
+          "body_sha256": "81422428f16a36db79606258b09c62e06081fcfb77c9852d44039efd4924211b",
+          "contains": [
+            "GitHub 返回 merged=true"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。",
+      "forbidden": [
+        "memory/facts/2026-10-13-1118-2.2.0 优化草稿 PR 与双平台验证-4ade4288.md"
+      ]
+    },
+    {
+      "id": "merge-sha",
+      "query": "2.2.0 优化合并提交是什么",
+      "expected": [
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md": {
+          "body_sha256": "81422428f16a36db79606258b09c62e06081fcfb77c9852d44039efd4924211b",
+          "contains": [
+            "合并提交为 37d63afc387fd1419a17b7b855487bb285bcd670"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "merge-platforms",
+      "query": "2.2.0 合并前检查覆盖哪些平台和 Python 版本",
+      "expected": [
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md": {
+          "body_sha256": "81422428f16a36db79606258b09c62e06081fcfb77c9852d44039efd4924211b",
+          "contains": [
+            "Windows/Linux 与 Python 3.10、3.11、3.13"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "merge-history",
+      "query": "旧的仅在优化分支尚未合并状态为什么过时",
+      "expected": [
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md"
+      ],
+      "evidence": {
+        "memory/facts/2026-10-13-1130-更正：2.2.0 优化已合并到 main-a3dd7710.md": {
+          "body_sha256": "81422428f16a36db79606258b09c62e06081fcfb77c9852d44039efd4924211b",
+          "contains": [
+            "旧的“仅存在于优化分支、尚未合并”结论已过时"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。",
+      "forbidden": [
+        "memory/facts/2026-10-13-1118-2.2.0 优化草稿 PR 与双平台验证-4ade4288.md"
+      ]
+    },
+    {
+      "id": "correction-history",
+      "query": "共享记忆更正时原来的正文与关系能直接删掉吗",
+      "expected": [
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md"
+      ],
+      "evidence": {
+        "memory/decisions/2026-10-13-1030-共享记忆检索优化与多 agent 兼容约束-44572750.md": {
+          "body_sha256": "dc138cabb077e824c17e656d39a9ca7896332fdcae95eafbd02fb2e0a803d21f",
+          "contains": [
+            "更正保留旧正文与关系"
+          ]
+        }
+      },
+      "no_answer": false,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "negative-balance",
+      "query": "当前云端 API 账户余额还剩多少钱",
+      "expected": [],
+      "evidence": {},
+      "no_answer": true,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "negative-vram",
+      "query": "默认嵌入模型在本机 GPU 实际占用多少显存",
+      "expected": [],
+      "evidence": {},
+      "no_answer": true,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    },
+    {
+      "id": "negative-weather",
+      "query": "北京明天天气怎样",
+      "expected": [],
+      "evidence": {},
+      "no_answer": true,
+      "reason": "人工核对正文和引用摘录；没有目标的条目是本次检索语料未记录的属性/域外问题。"
+    }
+  ]
+}

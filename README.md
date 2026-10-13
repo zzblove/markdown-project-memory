@@ -1,6 +1,6 @@
 # Markdown 项目共享记忆
 
-用 Markdown 保存项目的长期结论，让同一项目中的 AI agent 能检索、核对和补充已有知识。Markdown 是事实源，SQLite 只保存可重建的检索与 API 响应缓存。工具版本为 `2.2.0`，仅依赖 Python 标准库。
+用 Markdown 保存项目的长期结论，让同一项目中的 AI agent 能检索、核对和补充已有知识。Markdown 是事实源，SQLite 只保存可重建的检索与 API 响应缓存。工具版本为 `2.3.0`，仅依赖 Python 标准库。
 
 适合记录技术决策、环境约束和解决复杂问题的完整步骤。它不自动保存聊天全文；agent 按 `AGENTS.md` 协议主动读写。不同机器或 worktree 通过 Git 同步 Markdown，各自重建检索缓存。
 
@@ -35,7 +35,7 @@ python scripts/mem.py doctor
 
 `init` 会安装或更新 `scripts/mem.py`，在 `AGENTS.md` 中更新记忆协议，保留协议之外的项目约定、已有记忆和已有忽略规则。若目标项目自行修改过 `scripts/mem.py`，升级前应先比较修改，因为脚本本身会被替换。
 
-没有语义索引或没有可用 API 时，`search` 自动检索当前 Markdown。`doctor` 会提示索引未同步；这不妨碍离线查看、写入或关键词检索。
+没有语义索引或没有可用 API 时，`search` 自动检索当前 Markdown。索引部分同步时，未变化文件仍可复用向量，变更文件即时从当前原文参与检索。`doctor` 会提示待更新文件；这不妨碍离线查看、写入或关键词检索。从 2.2.0 升级时，未变化的嵌入输入与 API 缓存保持兼容，不因 CLI 版本号变化而整库重算。
 
 ## 日常使用
 
@@ -133,13 +133,58 @@ python scripts/mem.py search "部署环境" -k 5
 python scripts/mem.py search "部署环境" --no-rerank
 ```
 
-修改嵌入模型或接口后应重新建索引，必要时使用 `reindex --force`；成功强制重建也会清空 API 缓存。重排失败保留关键词/向量排名融合；索引过期、缺少 key 或嵌入调用失败会退回当前 Markdown。更换服务或模型后需重新评估相关性阈值；余弦、融合分和重排分不能直接比较。
+修改嵌入模型或接口后应重新建索引，必要时使用 `reindex --force`；成功强制重建也会清空 API 缓存。重排失败保留关键词/向量排名融合；没有兼容且未变化的文件向量、缺少 key 或嵌入调用失败会退回当前 Markdown。更换服务或模型后需重新评估相关性阈值；余弦、融合分和重排分不能直接比较。
 
 重复查询的向量和同查询/同候选内容的重排响应缓存在 `.index.sqlite` 内。缓存键包含服务、模型和实际请求内容；查询向量额外区分维度。缓存有效期 24 小时，最多 128 条，压缩后的响应总量最多 1 MiB（不是整个 SQLite 文件的磁盘上限）。失败不缓存，缓存写入失败不阻断检索。
 
-不缓存最终候选清单：每次读取当前 Markdown，新写入或更正的内容在索引未更新时仍能从本地检索；请求进行中有其他 agent 修改内容时也会转回最新 Markdown。正文变化后旧重排响应不会匹配新内容。
+不缓存最终候选清单：每次读取当前 Markdown。按文件原始内容哈希和嵌入输入版本筛选可用向量，变化、删除或不同模型的旧块不会参与检索。新增/更正文件即时走本地检索，其他文件的向量仍可使用。部分索引期间跳过重排，明确输出“候选，未重排”，避免将新片段自动发送给重排接口。
 
-完全离线维护可运行 `python scripts/mem.py reindex --local`。本地检索直接读取 Markdown，这个命令只初始化可重建缓存，不生成向量、不删除已有向量；恢复接口后再执行普通 `reindex`。
+请求进行中有其他 agent 修改记忆时，旧重排结果被丢弃，重新融合最新 Markdown 与仍有效的向量；无需重复调用查询嵌入，也不会返回变化文件的旧片段。所有 agent 默认共享同一目录中的有效知识，scope 只用于明确环境/模块条件。
+
+完全离线维护可运行 `python scripts/mem.py reindex --local`。它初始化缓存，并为嵌入输入未变化的文件复用已有向量（例如只补来源）；需要新嵌入的文件继续等待，不删除已有向量、不调用 API。恢复接口后执行普通 `reindex`，只生成实际变化的输入；`--force` 和 `--local` 不能同时使用。
+
+## 旧记忆整理与真实问题评测
+
+先检查缺少摘要、适用范围和依据的有效条目：
+
+```sh
+python scripts/mem.py audit
+python scripts/mem.py audit --json
+python scripts/mem.py annotate "memory/facts/<文件>.md" --summary "简短结论及适用条件" --scope production --source "原记录引用的部署清单"
+```
+
+`annotate` 默认只预览并给出文件哈希。确认内容后使用相同参数，加 `--apply --expected-hash <预览哈希>` 保存；哈希不符会拒绝覆盖，先读取其他 agent 的更新再预览。正文、原 date/updated/status、更正关系、未知元数据、BOM 和换行保持原样。重复/多行的待编辑字段须人工整理。维护不会自动刷新核实日期；`--verified-at` 只用于真正重新核实后的事实。
+
+本仓库包含人工核对真实历史的 26 个问题，其中 23 个有答案、3 个是未记录属性或域外问题。私有项目的问题集和报告应保存在本机、`memory/` 之外。运行：
+
+```sh
+python scripts/mem.py eval tests/fixtures/project_queries.json --report ../project-eval-local.json
+python scripts/mem.py eval tests/fixtures/project_queries.json --mode hybrid --report ../project-eval-hybrid.json
+```
+
+评测默认完全本地；`--mode hybrid` 明确启用配置的外部 API，发送查询及重排所需片段，不自动建索引。报告逐题记录候选、实际检索路径、弃权、预算隐藏和耗时，汇总 Hit@k、MRR、标注目标召回率、无答案候选率及历史禁选命中。命中率按实际展示预算计算，预算不足不算找到了目标，也不算证明无答案。无答案候选率指仍出现未弃权候选的比例，不是最终回答错误率。
+
+问题集采用以下格式。每个有答案问题须人工核对目标正文、填写归一化正文（去掉 frontmatter、首尾空白，CRLF 转 LF）的 SHA-256 和实际原文摘录；`expected` 是允许的有效记忆键，`forbidden` 可用于拒绝过时记录。可为每题指定 `scope`。无答案题设置 `no_answer: true`、空 expected/evidence，并在 reason 说明检查依据。
+
+```json
+{
+  "schema_version": 1,
+  "cases": [{
+    "id": "deployment-runtime",
+    "query": "生产部署使用哪个 Python 版本？",
+    "reason": "已人工核对部署记录中的环境和适用条件",
+    "expected": ["memory/facts/<文件>.md"],
+    "evidence": {
+      "memory/facts/<文件>.md": {
+        "body_sha256": "<正文 SHA-256>",
+        "contains": ["<支持答案的原文摘录>"]
+      }
+    }
+  }]
+}
+```
+
+正文或有效状态变化会使标签验证失败；评测期间任何记忆变化也会中止，避免旧标签产生虚假提升。补元数据不会改变正文哈希。小样本本地命中改善不能代表完整云端模型准确率；中文弱匹配和无答案干扰仍需结合重排、范围和原文核对评估。
 
 ## Git 与多人协作
 
