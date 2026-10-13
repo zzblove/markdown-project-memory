@@ -2,13 +2,17 @@
 import concurrent.futures
 import contextlib
 import importlib.util
+import http.server
 import io
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import struct
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -30,6 +34,7 @@ class MemoryTests(unittest.TestCase):
             spec = importlib.util.spec_from_file_location('isolated_mem', self.script)
             self.mem = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(self.mem)
+        self.real_post = self.mem.post
         self.no_network = mock.patch.object(
             self.mem, 'post', side_effect=AssertionError('External API forbidden in tests'))
         self.no_network.start()
@@ -47,11 +52,11 @@ class MemoryTests(unittest.TestCase):
         return result, output.getvalue(), errors.getvalue()
 
     def add(self, body='Deployment uses Python 3.11.', title='Deployment',
-            kind='fact', supersedes=None):
+            kind='fact', supersedes=None, **metadata):
         body_file = self.root / 'body.txt'
         body_file.write_text(body, encoding='utf-8')
         path, _, _ = self.capture(self.mem.cmd_add, kind, title, 'Verified environment',
-                                  str(body_file), supersedes)
+                                  str(body_file), supersedes, **metadata)
         return path
 
     def index(self):
@@ -85,7 +90,8 @@ class MemoryTests(unittest.TestCase):
         body.write_text('A durable concurrency decision.', encoding='utf-8')
         env = {key: value for key, value in os.environ.items() if not key.startswith('MEMORY_')}
         command = [sys.executable, str(self.script), 'add', '--type', 'decision',
-                   '--title', 'Same title', '--summary', 'Concurrent write', '--body-file', str(body)]
+                   '--title', 'Same title', '--summary', 'Concurrent write', '--body-file', str(body),
+                   '--no-dedupe']
         def write_one(_):
             return subprocess.run(command, cwd=self.root, env=env, capture_output=True,
                                   encoding='utf-8', timeout=40)
@@ -195,6 +201,382 @@ class MemoryTests(unittest.TestCase):
         self.assertNotIn('Do not match axb.', output)
         with self.assertRaises(ValueError):
             self.capture(self.mem.cmd_show, str(self.root / 'AGENTS.md'))
+
+    def test_summary_scope_and_evidence_are_stored_and_searchable(self):
+        body = self.root / 'summary.txt'
+        body.write_text('The verified configuration is recorded here.', encoding='utf-8')
+        path, _, _ = self.capture(self.mem.cmd_add, 'fact', 'Config', 'SummaryOnlyMarker: "verified"',
+            str(body), scope='production', source='docs/config: "revision 3"', verified_at='2026-10-13')
+        doc = self.mem.documents()[path]
+        self.assertEqual(doc['summary'], 'SummaryOnlyMarker: "verified"')
+        self.assertEqual(doc['source'], 'docs/config: "revision 3"')
+        self.assertEqual(doc['scope'], 'production')
+        _, output, _ = self.capture(self.mem.cmd_search, 'SummaryOnlyMarker', mode='local')
+        self.assertIn(path, output)
+        self.assertIn('2026-10-13', output)
+
+    def test_local_search_and_exact_title_do_not_read_keys_or_call_models(self):
+        path = self.add(title='服务认证约定')
+        self.index()
+        with mock.patch.object(self.mem, 'api_key', side_effect=AssertionError('No key reads')), \
+             mock.patch.object(self.mem, 'cached', side_effect=AssertionError('No vector reads')), \
+             mock.patch.object(self.mem, 'embed', side_effect=AssertionError('No model calls')):
+            _, local, _ = self.capture(self.mem.cmd_search, 'Python', mode='local')
+            _, automatic, _ = self.capture(self.mem.cmd_search, '服务认证约定')
+        self.assertIn(path, local)
+        self.assertIn(path, automatic)
+
+    def test_vector_scores_are_not_filtered_by_probability_threshold(self):
+        first = self.add('First evidence.', title='First')
+        second = self.add('Second evidence.', title='Second')
+        self.index()
+        with contextlib.closing(self.mem.db_conn()) as conn:
+            for path, vector in ((first, [.8,.6]), (second, [.6,.8])):
+                conn.execute('UPDATE chunks SET vector=? WHERE path=?', (struct.pack('<2f', *vector), path))
+        with mock.patch.object(self.mem, 'embed', return_value=[[1.,0.]]):
+            _, output, _ = self.capture(self.mem.cmd_search, 'UnknownSemanticQuery', k=2,
+                no_rerank=True, mode='hybrid', max_chars=4000)
+            _, filtered, _ = self.capture(self.mem.cmd_search, 'UnknownSemanticQuery', k=2,
+                no_rerank=True, mode='hybrid', min_vector_score=.7, max_chars=4000)
+        self.assertIn(first, output)
+        self.assertIn(second, output)
+        self.assertIn(first, filtered)
+        self.assertNotIn(second, filtered)
+
+    def test_logit_and_probability_thresholds_are_explicit(self):
+        path = self.add()
+        self.index()
+        with mock.patch.object(self.mem, 'embed', return_value=[[1.,0.]]), \
+             mock.patch.object(self.mem, 'rerank', return_value=[{'index':0,'relevance_score':.3}]):
+            _, logits, _ = self.capture(self.mem.cmd_search, 'semantic question',
+                mode='hybrid', rerank_scale='logit')
+            _, probability, _ = self.capture(self.mem.cmd_search, 'semantic question',
+                mode='hybrid', rerank_scale='probability')
+        self.assertIn(path, logits)
+        self.assertNotIn('无相关记忆', logits)
+        self.assertIn('无相关记忆', probability)
+        with self.assertRaises(ValueError):
+            self.capture(self.mem.cmd_search, 'query', min_rerank_score=2.)
+
+    def test_hybrid_preserves_exact_keyword_outside_vector_recall(self):
+        target = self.add('Build identifier ExactBuildMarker.', title='Build identifier')
+        for number in range(31):
+            self.add(f'Other topic number {number}.', title=f'Other {number}')
+        self.index()
+        with contextlib.closing(self.mem.db_conn()) as conn:
+            conn.execute('UPDATE chunks SET vector=? WHERE path=?', (struct.pack('<2f', -1.,0.),target))
+        with mock.patch.object(self.mem, 'embed', return_value=[[1.,0.]]):
+            _, output, _ = self.capture(self.mem.cmd_search, 'ExactBuildMarker', k=1,
+                no_rerank=True, mode='hybrid')
+        self.assertIn(target, output)
+
+    def test_rerank_quota_applies_after_file_deduplication(self):
+        self.add('\n\n'.join(f'## Section {i}\nEvidence for section {i}.' for i in range(40)), title='Long')
+        other = self.add('A separate memory.', title='Other')
+        self.index()
+        with mock.patch.object(self.mem, 'embed', return_value=[[1.,0.]]), \
+             mock.patch.object(self.mem, 'rerank', side_effect=lambda q,docs,n:
+                 [{'index':i,'relevance_score':.95} for i in range(n)]) as ranking:
+            _, output, _ = self.capture(self.mem.cmd_search, 'semantic question', k=2,
+                mode='hybrid', rerank_limit=2, max_chars=4000)
+        self.assertEqual(len(ranking.call_args.args[1]), 2)
+        self.assertIn(other, output)
+
+    def test_query_and_rerank_cache_reuse_without_caching_final_results(self):
+        path = self.add('CacheOriginalMarker.', title='Cache evidence')
+        self.index()
+        with mock.patch.object(self.mem, 'embed', return_value=[[1.,0.]]) as embedding, \
+             mock.patch.object(self.mem, 'rerank', return_value=[{'index':0,'relevance_score':.95}]) as ranking:
+            self.capture(self.mem.cmd_search, 'semantic question', mode='hybrid')
+            self.capture(self.mem.cmd_search, 'semantic question', mode='hybrid')
+            self.assertEqual(embedding.call_count, 1)
+            self.assertEqual(ranking.call_count, 1)
+            source = self.root / path
+            source.write_text(source.read_text(encoding='utf-8').replace('CacheOriginalMarker','CacheLatestMarker'), encoding='utf-8')
+            self.index()
+            _, output, _ = self.capture(self.mem.cmd_search, 'semantic question', mode='hybrid')
+            self.assertEqual(embedding.call_count, 1)
+            self.assertEqual(ranking.call_count, 2)
+            self.assertIn('CacheLatestMarker', output)
+            self.assertNotIn('CacheOriginalMarker', output)
+            self.capture(self.mem.cmd_search, 'semantic question', mode='hybrid', no_cache=True)
+            self.assertEqual(embedding.call_count, 2)
+            self.assertEqual(ranking.call_count, 3)
+
+    def test_api_cache_separates_models_urls_and_dimensions(self):
+        with mock.patch.object(self.mem, 'embed', return_value=[[1.,0.]]) as embedding:
+            self.mem.query_vector('same query', dimension=2)
+            self.mem.query_vector('same query', dimension=2)
+            with mock.patch.object(self.mem, 'EMBED_MODEL', 'another-model'):
+                self.mem.query_vector('same query', dimension=2)
+            with mock.patch.object(self.mem, 'BASE_URL', 'https://example.invalid/v1'):
+                self.mem.query_vector('same query', dimension=2)
+            self.mem.query_vector('same query', dimension=3)
+        self.assertEqual(embedding.call_count, 4)
+
+    def test_api_cache_is_bounded_expires_and_does_not_store_failures(self):
+        with mock.patch.object(self.mem, 'CACHE_LIMIT', 2), mock.patch.object(self.mem, 'CACHE_BYTES', 500), \
+             mock.patch.object(self.mem.time, 'time', return_value=1000.):
+            for number in range(4):
+                self.mem._cache_write(str(number), 'test', {'value': number})
+            with contextlib.closing(self.mem.db_conn()) as conn:
+                count, size = conn.execute('SELECT COUNT(*),SUM(length(value)) FROM api_cache').fetchone()
+            self.assertEqual(count, 2)
+            self.assertLessEqual(size, 500)
+            self.assertIsNotNone(self.mem._cache_read('3'))
+        with mock.patch.object(self.mem.time, 'time', return_value=1000.+self.mem.CACHE_TTL+1):
+            self.assertIsNone(self.mem._cache_read('3'))
+        with mock.patch.object(self.mem, 'embed', side_effect=RuntimeError('Unavailable')) as embedding:
+            for _ in range(2):
+                with self.assertRaises(RuntimeError):
+                    self.mem.query_vector('failed query')
+        self.assertEqual(embedding.call_count, 2)
+
+    def test_output_budget_includes_diagnostics_and_never_reports_budget_as_no_match(self):
+        for number in range(6):
+            self.add(f'BudgetMarker evidence {number}.', title=f'Budget {number}')
+        for budget in (64,128,512,1500):
+            with self.subTest(budget=budget):
+                _, output, errors = self.capture(self.mem.cmd_search, 'BudgetMarker', k=6, max_chars=budget)
+                self.assertLessEqual(len(output)+len(errors), budget)
+                self.assertNotIn('无相关记忆', output)
+                self.assertIn('候选', output)
+
+    def test_source_line_ranges_work_with_crlf_and_fenced_headings(self):
+        body = '# Guide\n\n'+('Background paragraph. '*60)+'\n\n```python\n# Not a new section\nx = 123\n```\n\n## Verification\nLineRangeMarker is verified.\n'
+        path = self.add(body, title='Guide')
+        source = self.root / path
+        text = source.read_text(encoding='utf-8')
+        source.write_bytes(text.replace('\n','\r\n').encode('utf-8'))
+        doc = self.mem.documents()[path]
+        chunks = self.mem.chunk_records(doc['text'],doc['title'])
+        code = next(row for row in chunks if 'x = 123' in row['text'])
+        self.assertIn('```python\n# Not a new section\nx = 123\n```', code['text'])
+        self.assertNotEqual(code['heading'], '# Not a new section')
+        hit = next(row for row in chunks if 'LineRangeMarker' in row['text'])
+        start,end = self.mem.hit_lines(doc,hit['text'])
+        _, output, _ = self.capture(self.mem.cmd_show,path,lines=f'{start}-{end}')
+        self.assertIn('LineRangeMarker', output)
+        self.assertNotIn('Background paragraph.', output)
+
+    def test_long_lines_are_completely_indexed_and_api_inputs_are_bounded(self):
+        text = '# Long line\n\n'+('A'*3400)+' TailMarker\n'
+        chunks = self.mem.split_chunks(text,'Long line')
+        self.assertEqual(sum(body.count('A') for _,body in chunks), 3400)
+        self.assertTrue(any('TailMarker' in body for _,body in chunks))
+        doc = dict(title='T'*300,summary='S'*300,scope='X'*200)
+        for heading,body in chunks:
+            self.assertLessEqual(len(self.mem.chunk_input(doc,heading,body)), 2000)
+
+    def test_correction_paths_with_commas_and_json_lists_keep_links(self):
+        old = self.add('CommaLegacyMarker was the old choice.', title='Cache, deployment')
+        new = self.add('The verified new choice.', title='Updated',kind='correction',supersedes=old)
+        self.assertEqual(self.mem.documents()[new]['supersedes'], [old])
+        _, output, _ = self.capture(self.mem.cmd_search,'CommaLegacyMarker',mode='local')
+        self.assertIn(new, output)
+        self.assertNotIn('  '+old+'  ', output)
+        source = self.root / new
+        source.write_text(source.read_text(encoding='utf-8').replace(
+            'supersedes: '+json.dumps(old,ensure_ascii=False),
+            'supersedes: '+json.dumps([old],ensure_ascii=False)),encoding='utf-8')
+        self.assertEqual(self.mem.documents()[new]['supersedes'], [old])
+
+    def test_shared_directory_has_stable_keys_across_project_roots(self):
+        shared = self.root / 'shared'
+        modules = []
+        for relative in ('project-a','nested/project-b'):
+            root = self.root / relative
+            script = root / 'scripts/mem.py'
+            script.parent.mkdir(parents=True)
+            shutil.copyfile(SOURCE,script)
+            environment = {key:value for key,value in os.environ.items() if not key.startswith('MEMORY_')}
+            environment['MEMORY_DIR'] = str(shared)
+            with mock.patch.dict(os.environ,environment,clear=True):
+                spec = importlib.util.spec_from_file_location('shared_mem',script)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            module.post = mock.Mock(side_effect=AssertionError('No external API'))
+            modules.append(module)
+        first, second = modules
+        body = self.root / 'shared-body.txt'
+        body.write_text('SharedLegacyMarker was the old value.',encoding='utf-8')
+        old, _, _ = self.capture(first.cmd_add,'fact','Shared','Original',str(body))
+        body.write_text('The verified new value.',encoding='utf-8')
+        new, _, _ = self.capture(first.cmd_add,'correction','Shared','Updated',str(body),old)
+        self.assertEqual(second.documents()[new]['supersedes'], [old])
+        _, output, _ = self.capture(second.cmd_search,'SharedLegacyMarker',mode='local')
+        self.assertIn(new, output)
+        _, original, _ = self.capture(second.cmd_show,new)
+        self.assertIn('verified new value', original)
+        with mock.patch.object(first,'embed',side_effect=lambda texts:[[1.,0.]]*len(texts)):
+            self.capture(first.cmd_reindex)
+        self.assertTrue(second.fresh(second.documents(),second.cached()[0]))
+
+    def test_deduplication_keeps_different_scope_source_and_verification(self):
+        original = self.add(scope='production',source='config/v1',verified_at='2026-10-13')
+        identical = self.add(scope='production',source='config/v1',verified_at='2026-10-13')
+        self.assertEqual(original,identical)
+        different_scope = self.add(scope='development',source='config/v1',verified_at='2026-10-13')
+        different_source = self.add(scope='production',source='config/v2',verified_at='2026-10-13')
+        self.assertEqual(len({original,different_scope,different_source}),3)
+
+    def test_concurrent_identical_writes_publish_one_memory(self):
+        body = self.root / 'same-body.txt'
+        body.write_text('One durable shared fact.',encoding='utf-8')
+        command = [sys.executable,str(self.script),'add','--type','fact','--title','Shared',
+                   '--summary','Same conclusion','--body-file',str(body)]
+        environment = {key:value for key,value in os.environ.items() if not key.startswith('MEMORY_')}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(lambda _:subprocess.run(command,cwd=self.root,env=environment,
+                capture_output=True,encoding='utf-8',timeout=40),range(6)))
+        for result in results:
+            self.assertEqual(result.returncode,0,result.stderr)
+        docs = self.mem.documents()
+        self.assertEqual(len(docs),1)
+        index = (self.root / 'memory/index.md').read_text(encoding='utf-8')
+        self.assertEqual(index.count(next(iter(docs))),1)
+
+    def test_correction_of_replaced_target_requires_current_entry(self):
+        old = self.add('Old value.')
+        current = self.add('New value.',kind='correction',supersedes=old)
+        with self.assertRaisesRegex(ValueError,'当前条目'):
+            self.add('Conflicting value.',kind='correction',supersedes=old)
+        self.assertEqual(len(self.mem.documents()),2)
+        self.assertEqual(self.mem.resolve_current(old,self.mem.replacements(self.mem.documents())),current)
+
+    def test_offline_reindex_preserves_existing_vectors(self):
+        self.add()
+        self.index()
+        before = self.mem.cached()
+        with mock.patch.object(self.mem,'embed',side_effect=AssertionError('No embedding call')):
+            self.capture(self.mem.cmd_reindex,local=True)
+        self.assertEqual(self.mem.cached(),before)
+
+    def test_chinese_retrieval_cases(self):
+        fixture = SOURCE.parents[1] / 'tests/fixtures/retrieval_cases.json'
+        data = json.loads(fixture.read_text(encoding='utf-8'))
+        paths = {}
+        body = self.root / 'fixture-body.txt'
+        for entry in data['memories']:
+            body.write_text(entry['body'],encoding='utf-8')
+            paths[entry['id']], _, _ = self.capture(self.mem.cmd_add,entry.get('type','fact'),
+                entry['title'],entry['summary'],str(body),
+                paths.get(entry.get('supersedes')),scope=entry.get('scope',''))
+        for case in data['queries']:
+            with self.subTest(query=case['query']):
+                rows = self.mem.local_candidates(case['query'],self.mem.documents(),scope=case.get('scope'))
+                expected = case.get('expected')
+                if expected:
+                    self.assertIn(paths[expected], [row[1] for row in rows[:3]])
+                else:
+                    self.assertEqual(rows,[])
+
+    def test_large_display_count_does_not_expand_rerank_api_budget(self):
+        for number in range(12):
+            self.add(f'Distinct evidence {number}.',title=f'Quota {number}')
+        self.index()
+        with mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]), \
+             mock.patch.object(self.mem,'rerank',side_effect=lambda q,docs,n:
+                 [{'index':i,'relevance_score':.95} for i in range(n)]) as ranking:
+            self.capture(self.mem.cmd_search,'semantic query',k=20,mode='hybrid',rerank_limit=4,max_chars=4000)
+        self.assertEqual(len(ranking.call_args.args[1]),4)
+
+    def test_show_excerpt_keeps_scope_and_evidence_context(self):
+        path = self.add('EvidenceContextMarker.',scope='production',source='deploy/manifest',verified_at='2026-10-13')
+        doc = self.mem.documents()[path]
+        start,end = self.mem.hit_lines(doc,'EvidenceContextMarker.')
+        _, output, _ = self.capture(self.mem.cmd_show,path,lines=f'{start}-{end}')
+        self.assertIn('production',output)
+        self.assertIn('deploy/manifest',output)
+        self.assertIn('2026-10-13',output)
+
+    def test_metadata_only_source_is_locally_searchable(self):
+        path = self.add('Verified setting.',source='deploy/manifest.yaml')
+        with mock.patch.object(self.mem,'cached',side_effect=AssertionError('Exact source needs no vectors')):
+            _, output, _ = self.capture(self.mem.cmd_search,'deploy/manifest.yaml')
+        self.assertIn(path,output)
+
+    def test_force_reindex_clears_api_responses_only_after_success(self):
+        self.add()
+        self.index()
+        self.mem._cache_write('saved','test',[1,2])
+        with mock.patch.object(self.mem,'embed',side_effect=RuntimeError('Unavailable')):
+            with self.assertRaises(RuntimeError):
+                self.capture(self.mem.cmd_reindex,force=True)
+        self.assertEqual(self.mem._cache_read('saved'),[1,2])
+        with mock.patch.object(self.mem,'embed',side_effect=lambda texts:[[1.,0.]]*len(texts)):
+            self.capture(self.mem.cmd_reindex,force=True)
+        self.assertIsNone(self.mem._cache_read('saved'))
+
+    def test_inflight_agent_edit_is_visible_instead_of_cached_candidate(self):
+        path = self.add('BeforeAgentEditMarker.',title='Agent evidence')
+        self.index()
+        source = self.root / path
+        def edit_while_ranking(query,docs,n):
+            source.write_text(source.read_text(encoding='utf-8').replace(
+                'BeforeAgentEditMarker','AfterAgentEditMarker'),encoding='utf-8')
+            return [{'index':0,'relevance_score':.95}]
+        with mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]), \
+             mock.patch.object(self.mem,'rerank',side_effect=edit_while_ranking):
+            _, output, errors = self.capture(self.mem.cmd_search,'AgentEditMarker',mode='hybrid')
+        self.assertIn('AfterAgentEditMarker',output)
+        self.assertNotIn('BeforeAgentEditMarker',output)
+        self.assertIn('最新 Markdown',errors)
+
+    def test_invalid_provider_indexes_and_metadata_are_rejected(self):
+        with mock.patch.object(self.mem,'post',return_value={
+                'results':[{'index':.5,'relevance_score':.9}]}):
+            with self.assertRaisesRegex(RuntimeError,'无效序号'):
+                self.mem.rerank('query',['first','second'],2)
+        with self.assertRaises(ValueError):
+            self.add(verified_at='20261013')
+        with self.assertRaises(ValueError):
+            self.add(scope='production\nstatus: outdated')
+
+    def test_http_embedding_and_rerank_contract_with_cache(self):
+        counts = {'embeddings':0,'rerank':0}
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*args):
+                pass
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                if self.headers['Authorization'] != 'Bearer offline-test-key':
+                    self.send_error(403)
+                    return
+                if self.path == '/v1/embeddings':
+                    counts['embeddings'] += 1
+                    result = {'data':[{'index':i,'embedding':[1.,0.]}
+                                     for i in range(len(payload['input']))]}
+                elif self.path == '/v1/rerank':
+                    counts['rerank'] += 1
+                    result = {'results':[{'index':i,'relevance_score':.95}
+                                         for i in range(payload['top_n'])]}
+                else:
+                    self.send_error(404)
+                    return
+                content = json.dumps(result).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type','application/json')
+                self.send_header('Content-Length',str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+        server = http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread = threading.Thread(target=server.serve_forever,daemon=True)
+        thread.start()
+        try:
+            path = self.add('HTTPContractMarker.',title='HTTP evidence')
+            with mock.patch.object(self.mem,'post',self.real_post), \
+                 mock.patch.object(self.mem,'api_key',return_value='offline-test-key'), \
+                 mock.patch.object(self.mem,'BASE_URL',f'http://127.0.0.1:{server.server_port}/v1'):
+                self.capture(self.mem.cmd_reindex)
+                self.capture(self.mem.cmd_search,'semantic query',mode='hybrid')
+                _, output, _ = self.capture(self.mem.cmd_search,'semantic query',mode='hybrid')
+            self.assertIn(path,output)
+            self.assertEqual(counts,{'embeddings':2,'rerank':1})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 if __name__ == '__main__':

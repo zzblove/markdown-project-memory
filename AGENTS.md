@@ -4,19 +4,19 @@
 本项目所有 AI agent 通过同一 memory/ 目录共享长期记忆。Markdown 是事实源，索引是派生缓存。
 
 ### 读（接到任务的第一个动作）
-1. 在项目根目录执行 `python scripts/mem.py search "<任务描述或关键词>" -k 5`。输出是**候选清单**：路径、命中片段、行号范围与文件标题大纲。
-2. 命中后**不要只凭摘要下结论**：用 `python scripts/mem.py show <路径> --lines A-B` 或 `show <路径> --grep "<关键词>" -C 2` 回看原文。引用数字、指标、SHA/哈希、行号、页码、路径、表格数值前必须 `--grep` 复核。
+1. 在项目根目录执行 `python scripts/mem.py search "<任务描述或关键词>"`。默认先展示 3 个候选、总输出最多 1500 字符；需要更多用 `-k 5 --max-chars 4000`。`--mode local` 完全本地检索，不读取 key 或调用 API。
+2. 摘要只用于筛选：先用候选给出的 `show --lines A-B` 阅读命中段、适用范围和依据；条件不清楚时展开上下文或全文。引用数字、指标、SHA/哈希、路径、表格数值前用 `show --grep "<关键词>" -C 2` 复核。
 3. 工具明确输出"无相关记忆"时即为检索无结果，改用 `rg -n -i "<关键词>" memory/` 并查看 `memory/index.md`，不要勉强套用低分候选。
-4. 代码和用户说法优先于记忆。更正关系用 supersedes，默认只返回有效条目，历史加 `--include-outdated`；`search --no-rerank` 可用纯向量分数排序（分数区间为余弦相似度，与重排分不可比）。
+4. 代码和用户说法优先于记忆。更正关系用 supersedes，默认只返回有效条目，历史加 `--include-outdated`；`--no-rerank` 保留关键词/向量排名融合。向量、融合名次和重排分不可比较，低置信候选不能作为答案。
 5. `python scripts/mem.py doctor` 检查索引、协议与元数据。换 worktree/机器默认不是同一记忆目录，共享需显式设置绝对 MEMORY_DIR。
 
 ### 写（形成长期结论后立即落盘）
 - 技术决策放 decisions/，含背景、结论、理由、被否方案；环境事实放 facts/；耗时问题的有效完整步骤放 howto/。
-- 一个主题一个文件，frontmatter 含 date、status: active；修订同步 updated。
+- 一个主题一个文件，frontmatter 含 date、status: active、summary；可用 --scope 区分环境/模块、--source 记录依据、--verified-at 记录核实日期。范围不是作者隔离，所有 agent 默认检索整个共享目录。
 - 优先用 `python scripts/mem.py add --type fact --title "<主题>" --summary "<摘要>" --body-file "<正文文件>"`；type 可为 fact/decision/howto/correction。
-- add 使用 YYYY-MM-DD-HHMM-主题-随机后缀.md、独占创建、写锁追加索引。手动写入必须唯一命名、UTF-8、末尾追加；禁止整文件覆盖来追加 index.md。
-- 更正正文含旧说法（路径与原文）、新事实、依据；type: correction、supersedes: <旧相对路径>。add 加 `--supersedes "<旧路径>"` 会标记旧文件 outdated、更新 updated、标注旧索引行，保留旧正文。
-- 写完执行 `python scripts/mem.py reindex`；失败不影响已落盘记忆，search 会从当前 Markdown 检索；API 恢复后再建索引。
+- add 在同一写锁内检查完全重复内容并发布。相同类型、标题、摘要、正文、范围和依据的有效记忆复用已有文件；不同条件保留独立记录。使用 --no-dedupe 可显式追加。手动写入必须唯一命名、UTF-8、末尾追加。
+- 更正正文含旧说法、路径、新事实与依据。supersedes 使用 memory/ 开头的稳定记忆键，支持 JSON 字符串或数组；逗号属于单个路径。add 标记旧文件 outdated、更新 updated，保留旧正文。目标已经被取代时先读取当前条目再更正。
+- 写完执行 `python scripts/mem.py reindex`；失败不影响已落盘记忆，search 从当前 Markdown 检索。离线维护可用 `reindex --local`，恢复 API 后再生成向量。API 缓存只复用请求响应，不缓存最终候选清单；每次检索仍核对当前 Markdown。
 - 禁止记录临时调试信息、代码直接可见内容、密钥和密码。
 
 ### 维护
