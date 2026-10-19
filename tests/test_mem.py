@@ -22,6 +22,64 @@ SOURCE = Path(__file__).resolve().parents[1] / 'scripts' / 'mem.py'
 
 
 class MemoryTests(unittest.TestCase):
+    def test_handoff_preserves_selected_original_and_hash_without_api(self):
+        path = self.add(body='Hypothesis only; training has not run.', scope='experiment-a', source='paper section 3')
+        target = self.mem.memory_path(path)
+        target.write_bytes(b'\xef\xbb\xbf'+target.read_bytes().replace(b'\n',b'\r\n'))
+        packet, output, _ = self.capture(self.mem.cmd_handoff,[path,path])
+        self.assertEqual(json.loads(output),packet)
+        self.assertEqual(packet['project_root'],str(self.root.resolve()))
+        self.assertEqual(len(packet['entries']),1)
+        entry = packet['entries'][0]
+        self.assertEqual(entry['sha256'],hashlib.sha256(target.read_bytes()).hexdigest())
+        self.assertEqual(entry['text'],target.read_bytes().decode('utf-8-sig'))
+        self.assertIn('Hypothesis only',entry['text'])
+        self.assertLessEqual(len(output.rstrip()),6000)
+
+    def test_handoff_rejects_outdated_outside_and_over_budget_sources(self):
+        old = self.add()
+        self.add(body='New evidence',kind='correction',supersedes=old)
+        with self.assertRaises(ValueError):
+            self.capture(self.mem.cmd_handoff,[old])
+        with self.assertRaises(ValueError):
+            self.capture(self.mem.cmd_handoff,['../body.txt'])
+        big = self.add(body='x'*7000,title='Large')
+        with self.assertRaisesRegex(ValueError,'预算'):
+            self.capture(self.mem.cmd_handoff,[big])
+        packet, _, _ = self.capture(self.mem.cmd_handoff,[big],10000)
+        self.assertIn('x'*7000,packet['entries'][0]['text'])
+
+    def test_delegated_child_cannot_publish_or_maintain_memory(self):
+        path = self.add()
+        before = {p:p.read_bytes() for p in (self.root/'memory').rglob('*.md')}
+        body = self.root/'body.txt'
+        operations = [
+            (self.mem.cmd_add,('fact','Child fact','candidate',str(body)),{}),
+            (self.mem.cmd_reindex,(),{'local':True}),
+            (self.mem.cmd_init,(str(self.root/'other'),),{}),
+            (self.mem.cmd_annotate,(path,),{'summary':'Changed','apply':True}),
+        ]
+        with mock.patch.dict(os.environ,{'CODEX_TEAM_CHILD':'1'}):
+            for func,args,kwargs in operations:
+                with self.subTest(operation=func.__name__), self.assertRaisesRegex(RuntimeError,'主控'):
+                    self.capture(func,*args,**kwargs)
+            # Reading and previews remain available; existing standalone writers keep their protocol.
+            self.capture(self.mem.cmd_show,path)
+            self.capture(self.mem.cmd_search,'Deployment',mode='local')
+            self.capture(self.mem.cmd_annotate,path,summary='Preview')
+        self.assertEqual(before,{p:p.read_bytes() for p in (self.root/'memory').rglob('*.md')})
+
+    def test_project_timezone_setting_preserves_default_and_uses_named_timezone(self):
+        self.assertEqual(self.mem.now().utcoffset(),self.mem.dt.timedelta(hours=8))
+        settings = self.root/'memory/.settings.json'
+        settings.write_text('{"timezone":"America/Los_Angeles"}',encoding='utf-8')
+        with mock.patch.object(self.mem,'ZoneInfo',return_value=self.mem.dt.timezone(self.mem.dt.timedelta(hours=-7))) as zone:
+            self.assertEqual(self.mem.now().utcoffset(),self.mem.dt.timedelta(hours=-7))
+        zone.assert_called_once_with('America/Los_Angeles')
+        settings.write_text('{"timezone":""}',encoding='utf-8')
+        with self.assertRaises(ValueError):
+            self.mem.now()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

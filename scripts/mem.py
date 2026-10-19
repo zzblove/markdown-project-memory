@@ -23,8 +23,9 @@ import urllib.error
 import urllib.request
 import uuid
 import zlib
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = '2.3.0'
+VERSION = '2.4.0'
 # CLI 升级不改变相同输入的嵌入与 API 响应身份；仅输入格式变化时升级这些版本。
 EMBED_PROFILE_VERSION = API_CACHE_VERSION = '2.2.0'
 # 使用同一规范路径，避免 Windows 8.3 短路径或目录链接破坏相对更正关系。
@@ -54,6 +55,14 @@ BEGIN, END = '<!-- shared-memory:BEGIN -->', '<!-- shared-memory:END -->'
 PROTOCOL = '''## 项目共享记忆（memory/）
 
 本项目所有 AI agent 通过同一 memory/ 目录共享长期记忆。Markdown 是事实源，索引是派生缓存。
+
+### 主控与子智能体协作（仅编排任务适用）
+- 主控检索并回看原文，只把本次相关、已核对的条目交给子智能体；所有角色共享项目知识，不按模型另建互不相通的记忆库。没有主控的独立会话继续按下方协议正常读写。
+- 可用 `handoff --ref "memory/<条目>.md"`（可重复，默认总预算 6000 字符）输出 JSON 记忆包，保存在 memory/ 外；它包含项目根、记忆目录、完整原文和文件哈希，不代替核实。派工入口用 `--memory-brief <包文件>` 显式传入，派工前核对目录和哈希。源文件变化时重新读取/核验并生成，不复用旧包。
+- `CODEX_TEAM_CHILD=1` 的受委派子智能体优先读取任务附带记忆；必要时仅补读原文或本地检索，不直接 add、更正、annotate --apply、init、reindex，也不手改 memory/。脚本拒绝这些受标记子进程的写入命令；这不替代系统权限。
+- 子智能体在结果末尾返回“记忆候选”：类型、结论、适用范围、依据、实际执行的验证、未确认事项；没有则写“无”。候选不自动入库，主控去重、核验冲突及证据后统一保存/reindex。进行中的任务交接和原始日志放 memory/ 外。
+- 论文原文结论、改进假设、待执行实验和实际实验结果必须区分；指标附数据版本/划分、配置、随机种子、基线及日志路径，缺失则明确说明，不把推测或子智能体自述写为已验证事实。
+- 并行任务结束后主控重新检索再合并；记忆更新时向仍在工作的子智能体显式发送变更或重派受影响部分，不假定上下文自动同步。跨项目/worktree 仅在显式配置同一绝对 MEMORY_DIR 时共享。
 
 ### 读（接到任务的第一个动作）
 1. 在项目根目录执行 `python scripts/mem.py search "<任务描述或关键词>"`。默认先展示 3 个候选、总输出最多 1500 字符；需要更多用 `-k 5 --max-chars 4000`。`--mode local` 完全本地检索，不读取 key 或调用 API。
@@ -88,7 +97,22 @@ def _utf8_stdout():
 
 
 def now():
+    config = Path(MEM_DIR)/'.settings.json'
+    if config.exists():
+        settings = json.loads(config.read_text(encoding='utf-8-sig'))
+        name = settings.get('timezone') if isinstance(settings,dict) else None
+        if not isinstance(name,str) or not name.strip():
+            raise ValueError('memory/.settings.json 需要非空 timezone')
+        try:
+            return dt.datetime.now(ZoneInfo(name))
+        except (ZoneInfoNotFoundError,ValueError):
+            raise ValueError('无法加载配置的 IANA 时区，请检查系统时区数据或 tzdata') from None
     return dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+
+
+def require_controller(operation):
+    if os.environ.get('CODEX_TEAM_CHILD')=='1':
+        raise RuntimeError(f'子智能体不能执行 {operation}；请返回记忆候选，由主控核验后写入/维护')
 
 
 def _keyfile(path):
@@ -469,6 +493,7 @@ def current_vectors(docs, known, rows, include_outdated=False, scope=None):
 
 
 def cmd_reindex(force=False, local=False):
+    require_controller('reindex')
     if not Path(MEM_DIR).is_dir():
         raise RuntimeError(f'记忆目录不存在: {MEM_DIR}')
     with contextlib.closing(db_conn()):
@@ -964,6 +989,8 @@ def metadata_patch(raw, fields):
 
 def cmd_annotate(path, summary=None, scope=None, source=None, verified_at=None,
                  expected_hash=None, apply=False):
+    if apply:
+        require_controller('annotate --apply')
     fields = {name:value for name,value in (('summary',summary),('scope',scope),('source',source),
                                             ('verified_at',verified_at)) if value is not None}
     if not fields or any(not isinstance(v,str) or not v.strip() or '\n' in v or '\r' in v for v in fields.values()):
@@ -1027,6 +1054,31 @@ def cmd_audit(limit=20, json_output=False, include_outdated=False):
 
 def body_hash(doc):
     return hashlib.sha256(doc['body'].replace('\r\n','\n').encode('utf-8')).hexdigest()
+
+
+def cmd_handoff(refs, max_chars=6000):
+    if not 512<=max_chars<=16000:
+        raise ValueError('handoff max-chars 需在 512 到 16000 之间')
+    keys = list(dict.fromkeys(reference(ref) for ref in refs))
+    if not keys or len(keys)>5:
+        raise ValueError('handoff 需要 1 到 5 个显式选择的记忆条目')
+    docs = documents()
+    active = eligible(docs)
+    entries = []
+    for key in keys:
+        if key not in active:
+            raise ValueError(f'记忆不存在或已过时，请重新检索: {key}')
+        doc = docs[key]
+        entries.append({'key':key,'sha256':doc['hash'],'text':doc['text']})
+    packet = {'schema_version':1,'kind':'memory-handoff','project_root':ROOT,
+              'memory_dir':MEM_DIR,'created_at':now().isoformat(),
+              'note':'主控显式选择的历史原文；文件哈希只验证内容新鲜度，不证明结论正确。',
+              'entries':entries}
+    rendered = json.dumps(packet,ensure_ascii=False,indent=2)
+    if len(rendered)>max_chars:
+        raise ValueError('记忆包超出总字符预算；减少条目或显式提高 --max-chars（最多 16000），不会截断原文')
+    print(rendered)
+    return packet
 
 
 def evaluation_cases(path, docs):
@@ -1237,6 +1289,7 @@ def memory_identity(kind,title,summary,body,scope='',source='',verified_at='',su
 
 
 def cmd_add(kind,title,summary,body_file,supersedes=None,scope='',source='',verified_at='',no_dedupe=False):
+    require_controller('add/correction')
     title, summary = title.strip(), summary.strip()
     if not title or not summary or '\n' in title or '\n' in summary:
         raise ValueError('标题和摘要必须非空且单行')
@@ -1313,6 +1366,7 @@ def cmd_add(kind,title,summary,body_file,supersedes=None,scope='',source='',veri
 
 
 def cmd_init(target):
+    require_controller('init')
     import shutil
     target = Path(target).expanduser().resolve()
     if not target.is_dir():
@@ -1432,6 +1486,9 @@ def main():
     sub.add_parser('stats'); sub.add_parser('doctor')
     i = sub.add_parser('init'); i.add_argument('target')
     h = sub.add_parser('show'); h.add_argument('path'); h.add_argument('--grep'); h.add_argument('-C','--context',type=int,default=0); h.add_argument('--lines'); h.add_argument('--section'); h.add_argument('--max-chars',type=int,default=200000)
+    handoff = sub.add_parser('handoff',help='将主控显式选择的有效记忆及哈希交给子智能体；JSON 标准输出')
+    handoff.add_argument('--ref',action='append',required=True)
+    handoff.add_argument('--max-chars',type=int,default=6000)
     a = sub.add_parser('add'); a.add_argument('--type',choices=('fact','decision','howto','correction'),required=True)
     for name in ('title','summary','body-file'):
         a.add_argument('--'+name,required=True)
@@ -1449,6 +1506,7 @@ def main():
         elif args.cmd=='add': cmd_add(args.type,args.title,args.summary,args.body_file,args.supersedes,
             args.scope,args.source,args.verified_at,args.no_dedupe)
         elif args.cmd=='show': cmd_show(args.path,args.grep,args.context,args.lines,args.section,args.max_chars)
+        elif args.cmd=='handoff': cmd_handoff(args.ref,args.max_chars)
         elif args.cmd=='audit': cmd_audit(args.limit,args.json,args.include_outdated)
         elif args.cmd=='annotate': cmd_annotate(args.path,args.summary,args.scope,args.source,args.verified_at,
                                                args.expected_hash,args.apply)
