@@ -1,6 +1,7 @@
 """Isolated, offline regression tests for the Markdown memory CLI."""
 import concurrent.futures
 import contextlib
+import hashlib
 import importlib.util
 import http.server
 import io
@@ -21,6 +22,64 @@ SOURCE = Path(__file__).resolve().parents[1] / 'scripts' / 'mem.py'
 
 
 class MemoryTests(unittest.TestCase):
+    def test_handoff_preserves_selected_original_and_hash_without_api(self):
+        path = self.add(body='Hypothesis only; training has not run.', scope='experiment-a', source='paper section 3')
+        target = self.mem.memory_path(path)
+        target.write_bytes(b'\xef\xbb\xbf'+target.read_bytes().replace(b'\n',b'\r\n'))
+        packet, output, _ = self.capture(self.mem.cmd_handoff,[path,path])
+        self.assertEqual(json.loads(output),packet)
+        self.assertEqual(packet['project_root'],str(self.root.resolve()))
+        self.assertEqual(len(packet['entries']),1)
+        entry = packet['entries'][0]
+        self.assertEqual(entry['sha256'],hashlib.sha256(target.read_bytes()).hexdigest())
+        self.assertEqual(entry['text'],target.read_bytes().decode('utf-8-sig'))
+        self.assertIn('Hypothesis only',entry['text'])
+        self.assertLessEqual(len(output.rstrip()),6000)
+
+    def test_handoff_rejects_outdated_outside_and_over_budget_sources(self):
+        old = self.add()
+        self.add(body='New evidence',kind='correction',supersedes=old)
+        with self.assertRaises(ValueError):
+            self.capture(self.mem.cmd_handoff,[old])
+        with self.assertRaises(ValueError):
+            self.capture(self.mem.cmd_handoff,['../body.txt'])
+        big = self.add(body='x'*7000,title='Large')
+        with self.assertRaisesRegex(ValueError,'预算'):
+            self.capture(self.mem.cmd_handoff,[big])
+        packet, _, _ = self.capture(self.mem.cmd_handoff,[big],10000)
+        self.assertIn('x'*7000,packet['entries'][0]['text'])
+
+    def test_delegated_child_cannot_publish_or_maintain_memory(self):
+        path = self.add()
+        before = {p:p.read_bytes() for p in (self.root/'memory').rglob('*.md')}
+        body = self.root/'body.txt'
+        operations = [
+            (self.mem.cmd_add,('fact','Child fact','candidate',str(body)),{}),
+            (self.mem.cmd_reindex,(),{'local':True}),
+            (self.mem.cmd_init,(str(self.root/'other'),),{}),
+            (self.mem.cmd_annotate,(path,),{'summary':'Changed','apply':True}),
+        ]
+        with mock.patch.dict(os.environ,{'CODEX_TEAM_CHILD':'1'}):
+            for func,args,kwargs in operations:
+                with self.subTest(operation=func.__name__), self.assertRaisesRegex(RuntimeError,'主控'):
+                    self.capture(func,*args,**kwargs)
+            # Reading and previews remain available; existing standalone writers keep their protocol.
+            self.capture(self.mem.cmd_show,path)
+            self.capture(self.mem.cmd_search,'Deployment',mode='local')
+            self.capture(self.mem.cmd_annotate,path,summary='Preview')
+        self.assertEqual(before,{p:p.read_bytes() for p in (self.root/'memory').rglob('*.md')})
+
+    def test_project_timezone_setting_preserves_default_and_uses_named_timezone(self):
+        self.assertEqual(self.mem.now().utcoffset(),self.mem.dt.timedelta(hours=8))
+        settings = self.root/'memory/.settings.json'
+        settings.write_text('{"timezone":"America/Los_Angeles"}',encoding='utf-8')
+        with mock.patch.object(self.mem,'ZoneInfo',return_value=self.mem.dt.timezone(self.mem.dt.timedelta(hours=-7))) as zone:
+            self.assertEqual(self.mem.now().utcoffset(),self.mem.dt.timedelta(hours=-7))
+        zone.assert_called_once_with('America/Los_Angeles')
+        settings.write_text('{"timezone":""}',encoding='utf-8')
+        with self.assertRaises(ValueError):
+            self.mem.now()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -532,6 +591,241 @@ class MemoryTests(unittest.TestCase):
             self.add(verified_at='20261013')
         with self.assertRaises(ValueError):
             self.add(scope='production\nstatus: outdated')
+
+    def test_partial_index_keeps_unchanged_vectors_and_latest_local_files(self):
+        stable = self.add('Meaning available only through vector lookup.',title='Stable')
+        changed = self.add('BeforeChangeMarker.',title='Changed')
+        self.index()
+        source = self.root / changed
+        source.write_text(source.read_text(encoding='utf-8').replace('BeforeChangeMarker','AfterChangeMarker'),encoding='utf-8')
+        added = self.add('AfterChangeMarker new shared evidence.',title='New agent')
+        # Corrupt stale vectors must be excluded before decoding or dimension selection.
+        with contextlib.closing(self.mem.db_conn()) as conn:
+            conn.execute('UPDATE chunks SET vector=? WHERE path=?',(b'bad',changed))
+            conn.commit()
+        with mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]) as embedding, \
+             mock.patch.object(self.mem,'rerank',side_effect=AssertionError('Dirty content must not be reranked')):
+            result, output, errors = self.capture(self.mem.cmd_search,'AfterChangeMarker',mode='hybrid',max_chars=4000)
+        self.assertEqual(result['kind'],'partial')
+        self.assertEqual(result['index']['current'],1)
+        self.assertEqual(embedding.call_count,1)
+        for path in (stable,changed,added):
+            self.assertIn(path,output)
+        self.assertIn('AfterChangeMarker',output)
+        self.assertNotIn('BeforeChangeMarker',output)
+        self.assertIn('部分同步',errors)
+
+    def test_removed_and_incompatible_files_never_supply_vectors(self):
+        stable = self.add('Retained semantic evidence.',title='Stable')
+        removed = self.add('DeletedMarker.',title='Removed')
+        incompatible = self.add('NewLocalMarker.',title='Different model')
+        self.index()
+        (self.root / removed).unlink()
+        with contextlib.closing(self.mem.db_conn()) as conn:
+            conn.execute('UPDATE files SET profile=? WHERE path=?',('old-model',incompatible))
+            conn.execute('UPDATE chunks SET vector=? WHERE path IN (?,?)',(b'bad',removed,incompatible))
+            conn.commit()
+        with mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]):
+            result = self.mem.search_result('NewLocalMarker',mode='hybrid',no_rerank=True)
+        self.assertEqual(result['kind'],'partial')
+        self.assertEqual({r[1] for r in result['rows']},{stable,incompatible})
+        self.assertEqual(result['index']['removed'],1)
+        with mock.patch.object(self.mem,'EMBED_MODEL','replacement-model'), \
+             mock.patch.object(self.mem,'embed',side_effect=AssertionError('No compatible vectors needs no API')):
+            result = self.mem.search_result('NewLocalMarker',mode='hybrid')
+        self.assertEqual(result['kind'],'fallback')
+        self.assertEqual({r[1] for r in result['rows']},{incompatible})
+
+    def test_partial_index_respects_corrections_and_scope_without_author_partition(self):
+        self.add('Other scope.',title='Other',scope='development')
+        old = self.add('ScopeMarker production legacy.',title='Old',scope='production')
+        self.index()
+        new = self.add('ScopeMarker verified current production.',title='Current',kind='correction',supersedes=old,scope='production')
+        with mock.patch.object(self.mem,'embed',side_effect=AssertionError('Only outdated scoped vectors must not call API')):
+            result = self.mem.search_result('ScopeMarker',mode='hybrid',scope='production')
+        self.assertEqual([r[1] for r in result['rows']],[new])
+        with mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]):
+            result = self.mem.search_result('ScopeMarker',mode='hybrid')
+        self.assertIn(new,[r[1] for r in result['rows']])
+        self.assertNotIn(old,[r[1] for r in result['rows']])
+        self.assertEqual(result['kind'],'partial')
+
+    def test_inflight_change_keeps_other_valid_vectors_and_discards_rerank(self):
+        stable = self.add('Unchanged semantic evidence.',title='Stable')
+        changed = self.add('BeforeNetworkMarker.',title='Changed')
+        self.index()
+        def edit_while_ranking(query,inputs,n):
+            source = self.root / changed
+            source.write_text(source.read_text(encoding='utf-8').replace('BeforeNetworkMarker','AfterNetworkMarker'),encoding='utf-8')
+            return [{'index':0,'relevance_score':.99}]
+        with mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]) as embedding, \
+             mock.patch.object(self.mem,'rerank',side_effect=edit_while_ranking) as ranking:
+            result, output, _ = self.capture(self.mem.cmd_search,'NetworkMarker',mode='hybrid',max_chars=4000)
+        self.assertEqual(result['kind'],'partial')
+        self.assertEqual(embedding.call_count,1)
+        self.assertEqual(ranking.call_count,1)
+        self.assertIn(stable,output)
+        self.assertIn('AfterNetworkMarker',output)
+        self.assertNotIn('BeforeNetworkMarker',output)
+        self.assertFalse(result['abstain'])
+
+    def test_cli_upgrade_preserves_220_vector_profile_and_api_cache_keys(self):
+        self.add()
+        legacy_profile = json.dumps(['2.2.0',self.mem.BASE_URL,self.mem.EMBED_MODEL,self.mem.LIMIT],separators=(',',':'))
+        self.assertEqual(self.mem.profile(),legacy_profile)
+        raw = json.dumps(['2.2.0',self.mem.BASE_URL,'query',[self.mem.EMBED_MODEL,'semantic upgrade',2]],
+                         ensure_ascii=False,sort_keys=True,separators=(',',':')).encode('utf-8')
+        key = hashlib.sha256(raw).hexdigest()
+        self.index()
+        self.mem._cache_write(key,'query',[1.,0.])
+        with mock.patch.object(self.mem,'VERSION','future-cli-version'), \
+             mock.patch.object(self.mem,'embed',side_effect=AssertionError('Code-only upgrade must reuse vectors and query cache')):
+            self.capture(self.mem.cmd_reindex)
+            self.assertEqual(self.mem.query_vector('semantic upgrade',dimension=2),[1.,0.])
+
+    def test_annotation_preview_and_apply_preserve_body_unknown_fields_dates_and_crlf(self):
+        path = self.add('Exact body.\n\n```yaml\nsummary: keep inside body\n```')
+        target = self.root / path
+        original = target.read_text(encoding='utf-8').replace('status: active','status: active\ncustom: |\n  Preserve unknown multiline YAML.\nupdated: 2020-01-02')
+        raw = b'\xef\xbb\xbf'+original.replace('\n','\r\n').encode('utf-8')
+        target.write_bytes(raw)
+        old_doc = self.mem.documents()[path]
+        preview, _, _ = self.capture(self.mem.cmd_annotate,path,summary='A concise verified description',scope='production',source='Original deployment record')
+        self.assertEqual(target.read_bytes(),raw)
+        self.assertFalse(preview['applied'])
+        applied, _, _ = self.capture(self.mem.cmd_annotate,path,summary='A concise verified description',scope='production',source='Original deployment record',
+                                      expected_hash=preview['expected_hash'],apply=True)
+        after = target.read_bytes()
+        self.assertTrue(applied['applied'])
+        self.assertTrue(after.startswith(b'\xef\xbb\xbf---\r\n'))
+        self.assertIn(b'custom: |\r\n  Preserve unknown multiline YAML.\r\n',after)
+        self.assertEqual(after.split(b'\r\n---\r\n',1)[1],raw.split(b'\r\n---\r\n',1)[1])
+        doc = self.mem.documents()[path]
+        self.assertEqual(doc['date'],old_doc['date'])
+        self.assertEqual(doc['updated'],'2020-01-02')
+        self.assertEqual(doc['verified_at'],'')
+        self.assertEqual(self.mem.body_hash(doc),self.mem.body_hash(old_doc))
+
+    def test_annotation_refuses_stale_hash_ambiguous_fields_and_outside_paths(self):
+        path = self.add()
+        preview, _, _ = self.capture(self.mem.cmd_annotate,path,scope='production')
+        target = self.root / path
+        target.write_text(target.read_text(encoding='utf-8')+'\nAnother agent wrote this.\n',encoding='utf-8')
+        before = target.read_bytes()
+        with self.assertRaisesRegex(ValueError,'文件已变化'):
+            self.capture(self.mem.cmd_annotate,path,scope='production',apply=True,expected_hash=preview['expected_hash'])
+        self.assertEqual(target.read_bytes(),before)
+        for raw in (b'---\nsummary: first\nsummary: second\n---\nBody',
+                    b'---\nsummary: |\n  Multiple lines.\n---\nBody'):
+            with self.assertRaises(ValueError):
+                self.mem.metadata_patch(raw,{'summary':'Updated'})
+        with self.assertRaises(ValueError):
+            self.capture(self.mem.cmd_annotate,path,scope='production',apply=True)
+        with self.assertRaises(ValueError):
+            self.capture(self.mem.cmd_annotate,str(self.root/'body.txt'),scope='production')
+
+    def test_source_annotation_reindex_reuses_embeddings_without_refreshing_verification(self):
+        path = self.add()
+        self.index()
+        preview, _, _ = self.capture(self.mem.cmd_annotate,path,source='manifest revision 7')
+        self.capture(self.mem.cmd_annotate,path,source='manifest revision 7',apply=True,expected_hash=preview['expected_hash'])
+        with mock.patch.object(self.mem,'embed',side_effect=AssertionError('Source is not embedding input')):
+            self.capture(self.mem.cmd_reindex,local=True)
+        self.assertEqual(self.mem.documents()[path]['verified_at'],'')
+        self.assertTrue(self.mem.fresh(self.mem.documents(),self.mem.cached()[0]))
+
+    def test_hybrid_reuses_local_candidates_and_scope_only_chunks_relevant_files(self):
+        target = self.add('ScopedMarker.',title='Scope target',scope='production')
+        self.add('Unrelated content.',title='Other',scope='development')
+        self.index()
+        original = self.mem.local_candidates
+        split = self.mem.split_chunks
+        with mock.patch.object(self.mem,'local_candidates',wraps=original) as lexical, \
+             mock.patch.object(self.mem,'split_chunks',wraps=split) as chunking, \
+             mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]):
+            result = self.mem.search_result('ScopedMarker',mode='hybrid',scope='production',no_rerank=True)
+        self.assertEqual(lexical.call_count,1)
+        self.assertEqual(chunking.call_count,1)
+        self.assertEqual([r[1] for r in result['rows']],[target])
+
+    def evaluation_fixture(self, paths_queries):
+        docs = self.mem.documents()
+        cases = []
+        for i,(path,query) in enumerate(paths_queries):
+            cases.append({'id':str(i),'query':query,'expected':[path] if path else [],'no_answer':path is None,
+                          'reason':'Manually checked original fixture evidence.',
+                          'evidence':{path:{'body_sha256':self.mem.body_hash(docs[path]),'contains':['# '+docs[path]['title']]}} if path else {}})
+        destination = self.root/'real-cases.json'
+        destination.write_text(json.dumps({'schema_version':1,'cases':cases}),encoding='utf-8')
+        return destination
+
+    def test_corpus_evaluation_tracks_hits_negative_candidates_and_actual_budget(self):
+        path = self.add('Deployment uses Python 3.11.',title='Deployment')
+        cases = self.evaluation_fixture([(path,'Python 3.11'),(None,'Deployment GPU inventory'),(None,'UnrelatedWeatherMarker')])
+        report = self.root/'report.json'
+        result, _, _ = self.capture(self.mem.cmd_eval,cases,report=str(report))
+        self.assertEqual(result['metrics']['hit_at_k'],1)
+        self.assertEqual(result['metrics']['mrr'],1)
+        self.assertEqual(result['metrics']['no_answer_candidate_rate'],.5)
+        self.assertEqual(result['pipelines'],{'local':3})
+        self.assertEqual(json.loads(report.read_text(encoding='utf-8'))['metrics'],result['metrics'])
+        result, _, _ = self.capture(self.mem.cmd_eval,cases,max_chars=64)
+        self.assertEqual(result['metrics']['hit_at_k'],0)
+        self.assertEqual(result['metrics']['no_answer_candidate_rate'],.5)
+        self.assertGreater(result['metrics']['budget_hidden_cases'],0)
+
+    def test_corpus_evaluation_uses_same_rerank_abstention_as_search(self):
+        path = self.add('Deployment uses Python.',title='Deployment')
+        self.index()
+        cases = self.evaluation_fixture([(path,'Deployment runtime'),(None,'Deployment GPU inventory')])
+        with mock.patch.object(self.mem,'embed',return_value=[[1.,0.]]), \
+             mock.patch.object(self.mem,'rerank',return_value=[{'index':0,'relevance_score':.2}]):
+            result, _, _ = self.capture(self.mem.cmd_eval,cases,mode='hybrid')
+        self.assertEqual(result['metrics']['hit_at_k'],0)
+        self.assertEqual(result['metrics']['no_answer_candidate_rate'],0)
+        self.assertEqual(result['pipelines'],{'hybrid':2})
+        self.assertTrue(all(r['abstained'] for r in result['results']))
+
+    def test_evaluation_validates_all_ground_truth_before_api_or_report(self):
+        path = self.add('Deployment runtime.',title='Deployment')
+        self.index()
+        cases = self.evaluation_fixture([(path,'Deployment'),(path,'runtime')])
+        data = json.loads(cases.read_text(encoding='utf-8'))
+        data['cases'][1]['evidence'][path]['body_sha256'] = '0'*64
+        cases.write_text(json.dumps(data),encoding='utf-8')
+        with mock.patch.object(self.mem,'search_result',side_effect=AssertionError('Invalid later label must fail before earlier query')):
+            with self.assertRaisesRegex(ValueError,'正文已变化'):
+                self.capture(self.mem.cmd_eval,cases,mode='hybrid',report=str(self.root/'report.json'))
+        self.assertFalse((self.root/'report.json').exists())
+        cases = self.evaluation_fixture([(path,'Deployment')])
+        with self.assertRaisesRegex(ValueError,'memory/'):
+            self.capture(self.mem.cmd_eval,cases,report=str(self.root/'memory/report.json'))
+
+    def test_evaluation_rejects_inflight_corpus_change(self):
+        path = self.add('InitialMarker.',title='Deployment')
+        cases = self.evaluation_fixture([(path,'InitialMarker')])
+        original = self.mem.search_result
+        def change_then_search(*args,**kwargs):
+            source = self.root/path
+            source.write_text(source.read_text(encoding='utf-8')+'\nAnother agent added evidence.\n',encoding='utf-8')
+            return original(*args,**kwargs)
+        with mock.patch.object(self.mem,'search_result',side_effect=change_then_search):
+            with self.assertRaisesRegex(ValueError,'记忆已变化'):
+                self.capture(self.mem.cmd_eval,cases,report=str(self.root/'report.json'))
+        self.assertFalse((self.root/'report.json').exists())
+
+    def test_public_project_queries_validate_real_corpus_and_history(self):
+        corpus = SOURCE.parents[1]/'memory'
+        if not corpus.is_dir():
+            self.skipTest('Repository corpus is not distributed with the global toolkit')
+        shutil.copytree(corpus,self.root/'memory',dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns('.index.sqlite*','.write.lock'))
+        cases = SOURCE.parents[1]/'tests/fixtures/project_queries.json'
+        result, _, _ = self.capture(self.mem.cmd_eval,cases)
+        self.assertEqual(result['metrics']['cases'],26)
+        self.assertEqual(result['metrics']['hit_at_k'],1)
+        self.assertEqual(result['metrics']['forbidden_cases'],0)
+        self.assertEqual(result['metrics']['reranked_cases'],0)
 
     def test_http_embedding_and_rerank_contract_with_cache(self):
         counts = {'embeddings':0,'rerank':0}

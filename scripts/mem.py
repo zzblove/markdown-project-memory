@@ -23,8 +23,11 @@ import urllib.error
 import urllib.request
 import uuid
 import zlib
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-VERSION = '2.2.0'
+VERSION = '2.4.0'
+# CLI 升级不改变相同输入的嵌入与 API 响应身份；仅输入格式变化时升级这些版本。
+EMBED_PROFILE_VERSION = API_CACHE_VERSION = '2.2.0'
 # 使用同一规范路径，避免 Windows 8.3 短路径或目录链接破坏相对更正关系。
 HERE = str(Path(__file__).resolve().parent)
 ROOT = str(Path(HERE).parent)
@@ -53,12 +56,20 @@ PROTOCOL = '''## 项目共享记忆（memory/）
 
 本项目所有 AI agent 通过同一 memory/ 目录共享长期记忆。Markdown 是事实源，索引是派生缓存。
 
+### 主控与子智能体协作（仅编排任务适用）
+- 主控检索并回看原文，只把本次相关、已核对的条目交给子智能体；所有角色共享项目知识，不按模型另建互不相通的记忆库。没有主控的独立会话继续按下方协议正常读写。
+- 可用 `handoff --ref "memory/<条目>.md"`（可重复，默认总预算 6000 字符）输出 JSON 记忆包，保存在 memory/ 外；它包含项目根、记忆目录、完整原文和文件哈希，不代替核实。派工入口用 `--memory-brief <包文件>` 显式传入，派工前核对目录和哈希。源文件变化时重新读取/核验并生成，不复用旧包。
+- `CODEX_TEAM_CHILD=1` 的受委派子智能体优先读取任务附带记忆；必要时仅补读原文或本地检索，不直接 add、更正、annotate --apply、init、reindex，也不手改 memory/。脚本拒绝这些受标记子进程的写入命令；这不替代系统权限。
+- 子智能体在结果末尾返回“记忆候选”：类型、结论、适用范围、依据、实际执行的验证、未确认事项；没有则写“无”。候选不自动入库，主控去重、核验冲突及证据后统一保存/reindex。进行中的任务交接和原始日志放 memory/ 外。
+- 论文原文结论、改进假设、待执行实验和实际实验结果必须区分；指标附数据版本/划分、配置、随机种子、基线及日志路径，缺失则明确说明，不把推测或子智能体自述写为已验证事实。
+- 并行任务结束后主控重新检索再合并；记忆更新时向仍在工作的子智能体显式发送变更或重派受影响部分，不假定上下文自动同步。跨项目/worktree 仅在显式配置同一绝对 MEMORY_DIR 时共享。
+
 ### 读（接到任务的第一个动作）
 1. 在项目根目录执行 `python scripts/mem.py search "<任务描述或关键词>"`。默认先展示 3 个候选、总输出最多 1500 字符；需要更多用 `-k 5 --max-chars 4000`。`--mode local` 完全本地检索，不读取 key 或调用 API。
 2. 摘要只用于筛选：先用候选给出的 `show --lines A-B` 阅读命中段、适用范围和依据；条件不清楚时展开上下文或全文。引用数字、指标、SHA/哈希、路径、表格数值前用 `show --grep "<关键词>" -C 2` 复核。
 3. 工具明确输出"无相关记忆"时即为检索无结果，改用 `rg -n -i "<关键词>" memory/` 并查看 `memory/index.md`，不要勉强套用低分候选。
 4. 代码和用户说法优先于记忆。更正关系用 supersedes，默认只返回有效条目，历史加 `--include-outdated`；`--no-rerank` 保留关键词/向量排名融合。向量、融合名次和重排分不可比较，低置信候选不能作为答案。
-5. `python scripts/mem.py doctor` 检查索引、协议与元数据。换 worktree/机器默认不是同一记忆目录，共享需显式设置绝对 MEMORY_DIR。
+5. `python scripts/mem.py doctor` 检查索引、协议与元数据。索引部分同步时，未变化文件仍复用向量，变更文件用当前 Markdown；候选未重排，不能当作已验证答案。换 worktree/机器默认不是同一记忆目录，共享需显式设置绝对 MEMORY_DIR。
 
 ### 写（形成长期结论后立即落盘）
 - 技术决策放 decisions/，含背景、结论、理由、被否方案；环境事实放 facts/；耗时问题的有效完整步骤放 howto/。
@@ -66,11 +77,13 @@ PROTOCOL = '''## 项目共享记忆（memory/）
 - 优先用 `python scripts/mem.py add --type fact --title "<主题>" --summary "<摘要>" --body-file "<正文文件>"`；type 可为 fact/decision/howto/correction。
 - add 在同一写锁内检查完全重复内容并发布。相同类型、标题、摘要、正文、范围和依据的有效记忆复用已有文件；不同条件保留独立记录。使用 --no-dedupe 可显式追加。手动写入必须唯一命名、UTF-8、末尾追加。
 - 更正正文含旧说法、路径、新事实与依据。supersedes 使用 memory/ 开头的稳定记忆键，支持 JSON 字符串或数组；逗号属于单个路径。add 标记旧文件 outdated、更新 updated，保留旧正文。目标已经被取代时先读取当前条目再更正。
-- 写完执行 `python scripts/mem.py reindex`；失败不影响已落盘记忆，search 从当前 Markdown 检索。离线维护可用 `reindex --local`，恢复 API 后再生成向量。API 缓存只复用请求响应，不缓存最终候选清单；每次检索仍核对当前 Markdown。
+- 写完执行 `python scripts/mem.py reindex`；失败不影响已落盘记忆。离线维护用 `reindex --local` 复用兼容的已有嵌入，其余文件待恢复 API 后生成向量；不删除历史向量。API 缓存只复用请求响应，不缓存最终候选清单；每次检索仍核对当前 Markdown。
 - 禁止记录临时调试信息、代码直接可见内容、密钥和密码。
 
 ### 维护
 - 每月一次；或记忆超过 80 文件、index.md 超过 60 行时运行 `python scripts/mem.py outdated`，以 updated（无则 date）计算阈值。
+- 用 `audit` 检查摘要、范围、依据缺失。`annotate <路径> --summary ... --scope ... --source ...` 默认仅预览；确认后加 `--apply --expected-hash <预览哈希>`，冲突时重新读取。保留正文、原日期和未知元数据；只在真正核实事实后填写 verified_at。
+- 用 `eval <问题集.json> --report <memory/外的报告.json>` 验证真实问题，默认 local，不自动建云端索引。标签须含原文摘录与正文哈希；私有问题与报告留在本机。无答案仍出现候选要单独检查，不能只看命中率。
 - 合并同主题（保留演进）→ 标记 outdated → 仅删除临时内容或已有完整更正替代的错误内容；决策不删。
 - 维护后 reindex；memory/ 随代码提交，前缀 memory:。SQLite、WAL/SHM 与锁文件不提交。
 '''
@@ -84,7 +97,22 @@ def _utf8_stdout():
 
 
 def now():
+    config = Path(MEM_DIR)/'.settings.json'
+    if config.exists():
+        settings = json.loads(config.read_text(encoding='utf-8-sig'))
+        name = settings.get('timezone') if isinstance(settings,dict) else None
+        if not isinstance(name,str) or not name.strip():
+            raise ValueError('memory/.settings.json 需要非空 timezone')
+        try:
+            return dt.datetime.now(ZoneInfo(name))
+        except (ZoneInfoNotFoundError,ValueError):
+            raise ValueError('无法加载配置的 IANA 时区，请检查系统时区数据或 tzdata') from None
     return dt.datetime.now(dt.timezone(dt.timedelta(hours=8)))
+
+
+def require_controller(operation):
+    if os.environ.get('CODEX_TEAM_CHILD')=='1':
+        raise RuntimeError(f'子智能体不能执行 {operation}；请返回记忆候选，由主控核验后写入/维护')
 
 
 def _keyfile(path):
@@ -154,7 +182,7 @@ def rerank(query, docs, top_n):
 
 
 def profile():
-    return json.dumps([VERSION, BASE_URL, EMBED_MODEL, LIMIT], separators=(',', ':'))
+    return json.dumps([EMBED_PROFILE_VERSION, BASE_URL, EMBED_MODEL, LIMIT], separators=(',', ':'))
 
 
 def frontmatter(text):
@@ -374,7 +402,7 @@ def cached():
 
 
 def _cache_key(kind, payload):
-    raw = json.dumps([VERSION, BASE_URL, kind, payload], ensure_ascii=False,
+    raw = json.dumps([API_CACHE_VERSION, BASE_URL, kind, payload], ensure_ascii=False,
                      sort_keys=True, separators=(',', ':')).encode('utf-8')
     return hashlib.sha256(raw).hexdigest()
 
@@ -448,27 +476,47 @@ def fresh(docs, known):
     return set(docs)==set(known) and all(known[p]==(d['hash'],profile()) for p,d in docs.items())
 
 
+def index_coverage(docs, known):
+    current = {p for p,d in docs.items() if known.get(p)==(d['hash'],profile())}
+    return {'current':len(current), 'pending':len(set(docs)-current),
+            'removed':len(set(known)-set(docs)), 'total':len(docs)}
+
+
+def current_vectors(docs, known, rows, include_outdated=False, scope=None):
+    """Exclude changed/deleted/incompatible files before any query API call."""
+    allowed, links = eligible(docs,include_outdated), replacements(docs)
+    if scope is not None:
+        allowed = {p for p in allowed if docs[p].get('scope') == scope}
+    return [row for row in rows if row[0] in docs
+            and known.get(row[0])==(docs[row[0]]['hash'],profile())
+            and (row[0] if include_outdated else resolve_current(row[0],links)) in allowed]
+
+
 def cmd_reindex(force=False, local=False):
+    require_controller('reindex')
     if not Path(MEM_DIR).is_dir():
         raise RuntimeError(f'记忆目录不存在: {MEM_DIR}')
     with contextlib.closing(db_conn()):
         pass
-    if local:
-        print('本地检索直接读取当前 Markdown；API 缓存已初始化，未调用外部 API。')
-        return
+    if force and local:
+        raise ValueError('--force 与 --local 不能同时使用；离线维护保留已有向量')
     docs, (known, rows) = documents(), cached()
     reuse = {h:b for p,_,_,h,b in rows if known.get(p,(None,None))[1]==profile()}
-    pending, inputs = {}, {}
+    pending, inputs, waiting = {}, {}, 0
     for path, doc in docs.items():
         if not force and known.get(path)==(doc['hash'],profile()):
             continue
-        prepared = []
+        prepared, needed = [], {}
         for heading, body in split_chunks(doc['text'], doc['title']):
             value = chunk_input(doc,heading,body)
             digest = hashlib.sha256(value.encode('utf-8')).hexdigest()
             prepared.append((heading,body,digest))
             if force or digest not in reuse:
-                inputs[digest] = value
+                needed[digest] = value
+        if local and needed:
+            waiting += 1
+            continue
+        inputs.update(needed)
         pending[path] = prepared
     keys = list(inputs)
     if keys:
@@ -506,12 +554,13 @@ def cmd_reindex(force=False, local=False):
         try:
             if force:
                 conn.execute('DELETE FROM api_cache')
-            live = walk_md_files()
-            for (path,) in conn.execute('SELECT path FROM files').fetchall():
-                if path not in live:
-                    conn.execute('DELETE FROM chunks WHERE path=?',(path,))
-                    conn.execute('DELETE FROM files WHERE path=?',(path,))
-                    removed += 1
+            if not local:
+                live = walk_md_files()
+                for (path,) in conn.execute('SELECT path FROM files').fetchall():
+                    if path not in live:
+                        conn.execute('DELETE FROM chunks WHERE path=?',(path,))
+                        conn.execute('DELETE FROM files WHERE path=?',(path,))
+                        removed += 1
             conn.commit()
         except BaseException:
             conn.rollback()
@@ -519,6 +568,8 @@ def cmd_reindex(force=False, local=False):
         count = conn.execute('SELECT COUNT(*) FROM files').fetchone()[0]
         chunks = conn.execute('SELECT COUNT(*) FROM chunks').fetchone()[0]
     print(f'完成: 变更 {changed} / 移除 {removed} / 并发修改跳过 {skipped}; 索引 {count} 文件 {chunks} 段')
+    if local:
+        print(f'离线维护：复用已有嵌入，{waiting} 文件仍待生成向量；未调用外部 API，未删除历史向量。')
     if skipped:
         print('提示: 计算期间文件变化，可再次 reindex；search 将使用最新 Markdown。')
 
@@ -596,22 +647,28 @@ def shell_path(path):
     return "'"+path.replace("'", "''")+"'" if os.name == 'nt' else shlex.quote(path)
 
 
-def print_results(query, results, docs, mode, k, abstain=False, max_chars=DEFAULT_MAX_CHARS):
-    links, dedup = replacements(docs), {}
+def ranked_results(results, docs, k):
+    dedup = {}
     for row in results:
         if row[1] not in dedup or row[0] > dedup[row[1]][0]:
             dedup[row[1]] = row
-    final = sorted(dedup.values(), key=lambda row:(row[0], docs[row[1]]['updated']), reverse=True)[:k]
+    return sorted(dedup.values(), key=lambda row:(row[0], docs[row[1]]['updated']), reverse=True)[:k]
+
+
+def format_results(query, results, docs, mode, k, abstain=False, max_chars=DEFAULT_MAX_CHARS):
+    """Return the exact display and visible paths so evaluation includes its budget."""
+    links = replacements(docs)
+    final = ranked_results(results,docs,k)
     header = f'查询: {query[:100]}  ({mode}, {len(final)} 个候选)\n'
     warning = '无相关记忆：重排低于阈值。以下仅供核对，不能据此回答。\n' if abstain else ''
     footer = '提示: 摘要/片段只用于筛选；引用数字、路径前用 show --grep 回看原文。\n'
     omitted_note = '有候选未展示，请增大 --max-chars；需要更多候选可增大 -k。\n'
     if not final:
-        print(('无相关记忆。请换关键词，或查看 memory/index.md。\n')[:max_chars], end='')
-        return
+        return ('无相关记忆。请换关键词，或查看 memory/index.md。\n')[:max_chars], []
     output = header+warning
-    shown = 0
+    visible = []
     for score,path,heading,body in final:
+        shown = len(visible)
         doc = docs[path]
         start,end = hit_lines(doc,body)
         state = doc['status']+('/已被取代' if path in links else '')
@@ -634,22 +691,31 @@ def print_results(query, results, docs, mode, k, abstain=False, max_chars=DEFAUL
             if len(output)+len(item)+reserve > max_chars:
                 break
         output += item
-        shown += 1
-    if shown < len(final):
+        visible.append(path)
+    if len(visible) < len(final):
         output += omitted_note
     output += footer
-    if len(output) > max_chars or not shown:
+    if len(output) > max_chars or not visible:
         output = warning+'有候选，预算不足以展示完整引用。请增大 --max-chars。\n'
-    print(output[:max_chars], end='')
+        visible = []
+    return output[:max_chars], visible
+
+
+def print_results(query, results, docs, mode, k, abstain=False, max_chars=DEFAULT_MAX_CHARS):
+    output, visible = format_results(query,results,docs,mode,k,abstain,max_chars)
+    print(output,end='')
+    return visible
 
 
 def local_candidates(query, docs, include_outdated=False, scope=None):
     links, allowed, best = replacements(docs), eligible(docs,include_outdated), {}
     if scope is not None:
         allowed = {p for p in allowed if docs[p].get('scope') == scope}
-    chunks = {p: split_chunks(d['text'],d['title']) or [(d['title'],d['body'])] for p,d in docs.items()}
+    targets = {p:p if include_outdated else resolve_current(p,links) for p in docs}
+    relevant = {p for p,target in targets.items() if target in allowed} | allowed
+    chunks = {p:split_chunks(docs[p]['text'],docs[p]['title']) or [(docs[p]['title'],docs[p]['body'])] for p in relevant}
     for path,doc in docs.items():
-        target = path if include_outdated else resolve_current(path,links)
+        target = targets[path]
         if target not in allowed:
             continue
         prefix = (3*lexical_score(query,doc['title'])+2*lexical_score(query,doc.get('summary',''))
@@ -702,9 +768,47 @@ def strong_local_match(query, rows, docs):
     return bool(identifier and len(exact) == 1 and rows[0][1] == exact[0][1])
 
 
-def cmd_search(query, k=3, include_outdated=False, no_rerank=False, mode='auto',
+def vector_candidates(query, docs, known, rows, qv, include_outdated=False, scope=None,
+                      min_vector_score=None):
+    rows = current_vectors(docs,known,rows,include_outdated,scope)
+    allowed, links = eligible(docs,include_outdated), replacements(docs)
+    if scope is not None:
+        allowed = {p for p in allowed if docs[p].get('scope') == scope}
+    scored, lookup, best = [], {}, {}
+    for path,heading,body,_,blob in rows:
+        vector = struct.unpack(f'<{len(blob)//4}f',blob)
+        if len(vector) != len(qv) or not all(math.isfinite(x) for x in vector):
+            raise RuntimeError('嵌入维度变化或向量损坏；请 reindex --force')
+        scored.append((sum(a*b for a,b in zip(qv,vector)),path,heading,body))
+    scored.sort(reverse=True)
+    for row in scored:
+        lookup.setdefault(row[1],row)
+    for score,path,heading,body in scored:
+        target = path if include_outdated else resolve_current(path,links)
+        if target not in allowed or (min_vector_score is not None and score < min_vector_score):
+            continue
+        if target != path:
+            _,_,heading,body = lookup.get(target,(score,target,docs[target]['title'],docs[target]['body']))
+        if target not in best:
+            best[target] = (score,target,heading,body)
+    return sorted(best.values(),reverse=True)
+
+
+def mixed_candidates(query, docs, known, rows, qv, include_outdated, scope, min_vector_score, lexical=None):
+    if lexical is None:
+        lexical = local_candidates(query,docs,include_outdated,scope)
+    vectors = vector_candidates(query,docs,known,rows,qv,include_outdated,scope,min_vector_score)
+    candidates = fuse_rankings(lexical,vectors)[:RECALL]
+    vector_parts = {row[1]:row[2:] for row in vectors}
+    return [(score,path)+vector_parts[path]
+            if path in vector_parts and lexical_score(query,vector_parts[path][1]) >= lexical_score(query,body)
+            else (score,path,heading,body) for score,path,heading,body in candidates]
+
+
+def search_result(query, k=3, include_outdated=False, no_rerank=False, mode='auto',
                max_chars=DEFAULT_MAX_CHARS, rerank_limit=DEFAULT_RERANK_LIMIT, scope=None,
                min_vector_score=None, rerank_scale=RERANK_SCALE, min_rerank_score=None, no_cache=False):
+    """Shared retrieval pipeline for the CLI and corpus-based evaluation."""
     query = query.strip()
     if k < 1 or not query or len(query) > 2000:
         raise ValueError('查询须为 1-2000 字符，k 必须大于 0')
@@ -719,55 +823,40 @@ def cmd_search(query, k=3, include_outdated=False, no_rerank=False, mode='auto',
         raise ValueError('重排阈值须为有限数；probability 分制范围为 0 到 1')
     docs = documents()
     lexical = local_candidates(query,docs,include_outdated,scope)
-    remaining = max_chars
-    def notice(message):
-        nonlocal remaining
-        limit = max(0,min(160,remaining-64))
-        if limit:
-            diagnostic = message[:limit-1]+'\n'
-            print(diagnostic,end='',file=sys.stderr)
-            remaining -= len(diagnostic)
+    diagnostics, known = [], {}
+    def result(rows, current, label, kind, abstain=False):
+        return {'query':query, 'rows':rows, 'docs':current, 'label':label, 'kind':kind,
+                'abstain':abstain, 'reranked':label=='混合检索 + 重排',
+                'diagnostics':diagnostics, 'index':index_coverage(current,known)}
+    def local(current, kind='fallback'):
+        return result(local_candidates(query,current,include_outdated,scope),current,
+                      '当前 Markdown 关键词检索',kind)
     if mode == 'local' or (mode == 'auto' and strong_local_match(query,lexical,docs)):
-        return print_results(query,lexical,docs,'本地检索（未调用 API）',k,max_chars=max_chars)
+        return result(lexical,docs,'本地检索（未调用 API）','local')
     try:
         known, rows = cached()
-        if not fresh(docs,known):
-            raise RuntimeError('索引未同步或格式/模型配置变化；请 reindex')
-        if not rows:
-            raise RuntimeError('语义索引为空')
-        allowed, links = eligible(docs,include_outdated), replacements(docs)
+        usable = current_vectors(docs,known,rows,include_outdated,scope)
+        allowed = eligible(docs,include_outdated)
         if scope is not None:
             allowed = {p for p in allowed if docs[p].get('scope') == scope}
         if not allowed:
-            return print_results(query,[],docs,'本地范围筛选',k,max_chars=max_chars)
-        qv, best, lookup = query_vector(query,not no_cache,len(rows[0][4])//4), {}, {}
-        scored = []
-        for path,heading,body,_,blob in rows:
-            vector = struct.unpack(f'<{len(blob)//4}f',blob)
-            if len(vector) != len(qv) or not all(math.isfinite(x) for x in vector):
-                raise RuntimeError('嵌入维度变化或向量损坏；请 reindex --force')
-            scored.append((sum(a*b for a,b in zip(qv,vector)),path,heading,body))
-        for row in sorted(scored,reverse=True):
-            lookup.setdefault(row[1],row)
-        for row in sorted(scored,reverse=True):
-            score,path,heading,body = row
-            target = path if include_outdated else resolve_current(path,links)
-            if target not in allowed or (min_vector_score is not None and score < min_vector_score):
-                continue
-            if target != path:
-                _,_,heading,body = lookup.get(target,(score,target,docs[target]['title'],docs[target]['body']))
-            if target not in best:
-                best[target] = (score,target,heading,body)
-        vectors = sorted(best.values(),reverse=True)
-        candidates = fuse_rankings(lexical,vectors)[:RECALL]
-        vector_parts = {row[1]: row[2:] for row in vectors}
-        candidates = [(score,path)+vector_parts[path]
-            if path in vector_parts and lexical_score(query,vector_parts[path][1]) >= lexical_score(query,body)
-            else (score,path,heading,body) for score,path,heading,body in candidates]
+            return result([],docs,'本地范围筛选','local')
+        if not usable:
+            raise RuntimeError('没有当前文件的可用向量（索引未同步或模型配置变化）；请 reindex')
+        dimension = len(usable[0][4])//4
+        if not dimension or len(usable[0][4])%4:
+            raise RuntimeError('向量损坏；请 reindex --force')
+        qv = query_vector(query,not no_cache,dimension)
+        candidates = mixed_candidates(query,docs,known,rows,qv,include_outdated,scope,min_vector_score,lexical)
         if not candidates:
-            return grep_fallback(query,k,include_outdated,docs,max_chars,scope)
-        final, weak, label = candidates, False, '关键词 + 向量排名融合（候选）'
-        if not no_rerank:
+            return local(documents())
+        partial = not fresh(docs,known)
+        final, weak, label, kind = candidates, False, '关键词 + 向量排名融合（候选）', 'hybrid'
+        if partial:
+            coverage = index_coverage(docs,known)
+            diagnostics.append(f'[mem] 索引部分同步：{coverage["current"]}/{coverage["total"]} 文件可复用向量；变更文件用当前 Markdown，暂不重排')
+            label, kind = '部分向量 + 当前 Markdown（候选，未重排）', 'partial'
+        if not no_rerank and not partial:
             selected = candidates[:rerank_limit]
             try:
                 inputs = [chunk_input(docs[p],h,b) for _,p,h,b in selected]
@@ -779,16 +868,43 @@ def cmd_search(query, k=3, include_outdated=False, no_rerank=False, mode='auto',
                 final = final[:1] if weak else [row for row in final if row[0] >= threshold]
                 label = '混合检索 + 重排'
             except RuntimeError as error:
-                notice(f'[mem] {error}，保留排名融合候选（相关性未验证）')
+                diagnostics.append(f'[mem] {error}，保留排名融合候选（相关性未验证）')
                 final, weak, label = candidates, False, '排名融合（重排不可用，仅供核对）'
         latest = documents()
         if {p:d['hash'] for p,d in docs.items()} != {p:d['hash'] for p,d in latest.items()}:
-            notice('[mem] 检索期间文件变化，使用最新 Markdown')
-            return grep_fallback(query,k,include_outdated,latest,remaining,scope)
-        print_results(query,final,docs,label,k,weak,remaining)
+            diagnostics.append('[mem] 检索期间文件变化，使用最新 Markdown 与仍有效的向量；丢弃旧重排结果')
+            if current_vectors(latest,known,rows,include_outdated,scope):
+                final = mixed_candidates(query,latest,known,rows,qv,include_outdated,scope,min_vector_score)
+                return result(final,latest,'部分向量 + 最新 Markdown（候选，未重排）','partial')
+            return local(latest)
+        return result(final,docs,label,kind,weak)
     except (RuntimeError,sqlite3.Error,struct.error,IndexError) as error:
-        notice(f'[mem] {error}，降级检索当前 Markdown')
-        return grep_fallback(query,k,include_outdated,max_chars=remaining,scope=scope)
+        diagnostics.append(f'[mem] {error}，降级检索当前 Markdown')
+        return local(documents())
+
+
+def format_search(result, k=3, max_chars=DEFAULT_MAX_CHARS):
+    remaining, messages = max_chars, []
+    for message in result['diagnostics']:
+        limit = max(0,min(160,remaining-64))
+        if limit:
+            diagnostic = message[:limit-1]+'\n'
+            messages.append(diagnostic)
+            remaining -= len(diagnostic)
+    output, visible = format_results(result['query'],result['rows'],result['docs'],result['label'],
+                                     k,result['abstain'],remaining)
+    return output, ''.join(messages), visible
+
+
+def cmd_search(query, k=3, include_outdated=False, no_rerank=False, mode='auto',
+               max_chars=DEFAULT_MAX_CHARS, rerank_limit=DEFAULT_RERANK_LIMIT, scope=None,
+               min_vector_score=None, rerank_scale=RERANK_SCALE, min_rerank_score=None, no_cache=False):
+    result = search_result(query,k,include_outdated,no_rerank,mode,max_chars,rerank_limit,scope,
+                           min_vector_score,rerank_scale,min_rerank_score,no_cache)
+    output, errors, visible = format_search(result,k,max_chars)
+    print(errors,end='',file=sys.stderr)
+    print(output,end='')
+    return result
 
 
 def cmd_show(path, grep=None, context=0, lines=None, section=None, max_chars=200000):
@@ -844,6 +960,239 @@ def cmd_show(path, grep=None, context=0, lines=None, section=None, max_chars=200
     print(body[:max_chars]+('\n…（输出被 --max-chars 截断）' if len(body)>max_chars else ''))
 
 
+def metadata_patch(raw, fields):
+    """Edit only requested flat fields, preserving body/unknown YAML/BOM/newlines."""
+    text = raw.decode('utf-8')
+    match = FRONT_RE.match(text)
+    if not match:
+        raise ValueError('annotate 需要已有 frontmatter；请先人工确认日期和状态')
+    rows = text.splitlines(keepends=True)
+    close = text[:match.end(1)].count('\n')+1
+    newline = '\r\n' if rows[0].endswith('\r\n') else '\n'
+    header = rows[1:close]
+    for field,value in fields.items():
+        matches = [i for i,line in enumerate(header) if re.match(r'^'+re.escape(field)+r':',line)]
+        if len(matches)>1:
+            raise ValueError(f'{field} 重复，须先人工整理')
+        new_line = field+': '+json.dumps(value,ensure_ascii=False)+newline
+        if matches:
+            i = matches[0]
+            tail = header[i].split(':',1)[1].strip()
+            if tail.startswith(('|','>')) or (i+1<len(header) and header[i+1][:1].isspace() and header[i+1].strip()):
+                raise ValueError(f'{field} 是多行字段，须先人工整理')
+            ending = re.search(r'(\r\n|\n|\r)$',header[i])
+            header[i] = new_line[:-len(newline)]+(ending[0] if ending else newline)
+        else:
+            header.append(new_line)
+    return (rows[0]+''.join(header)+''.join(rows[close:])).encode('utf-8')
+
+
+def cmd_annotate(path, summary=None, scope=None, source=None, verified_at=None,
+                 expected_hash=None, apply=False):
+    if apply:
+        require_controller('annotate --apply')
+    fields = {name:value for name,value in (('summary',summary),('scope',scope),('source',source),
+                                            ('verified_at',verified_at)) if value is not None}
+    if not fields or any(not isinstance(v,str) or not v.strip() or '\n' in v or '\r' in v for v in fields.values()):
+        raise ValueError('请提供非空、单行的 summary/scope/source/verified-at')
+    if verified_at is not None:
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}',verified_at):
+            raise ValueError('verified-at 须为 YYYY-MM-DD；仅在重新核实后填写')
+        dt.date.fromisoformat(verified_at)
+    if expected_hash is not None and not re.fullmatch(r'[0-9a-f]{64}',expected_hash):
+        raise ValueError('expected-hash 须为预览给出的 SHA-256')
+    if apply and not expected_hash:
+        raise ValueError('保存前请预览，再用 --apply --expected-hash <预览哈希>')
+    target = memory_path(path)
+    if target.suffix.lower()!='.md' or target.resolve()==(Path(MEM_DIR)/'index.md').resolve():
+        raise ValueError('annotate 只允许 memory/ 内的 Markdown 条目，不编辑 index.md 或缓存')
+    with write_lock():
+        raw = target.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if expected_hash and digest != expected_hash:
+            raise ValueError('文件已变化，请重新读取/预览；未覆盖其它 agent 的修改')
+        updated = metadata_patch(raw,fields)
+        before = frontmatter(raw.decode('utf-8-sig'))
+        changes = {name:{'before':before.get(name,''),'after':value}
+                   for name,value in fields.items() if before.get(name,'') != value}
+        if apply and changes:
+            atomic_write(target,updated)
+    report = {'path':reference(str(target)), 'expected_hash':digest, 'changes':changes,
+              'applied':bool(apply and changes), 'body_preserved':True}
+    print(json.dumps(report,ensure_ascii=False,indent=2))
+    if changes:
+        print('已保存；执行 reindex（离线可用 --local）。' if apply else
+              '仅预览；确认后使用 --apply --expected-hash '+digest)
+    return report
+
+
+def cmd_audit(limit=20, json_output=False, include_outdated=False):
+    if limit<1:
+        raise ValueError('limit 必须大于 0')
+    docs = documents()
+    paths = eligible(docs,include_outdated)
+    fields = ('summary','scope','source','verified_at')
+    report = {'documents':len(docs), 'reviewed':len(paths),
+              'coverage':{f:sum(bool(docs[p].get(f)) for p in paths) for f in fields},
+              'missing':[]}
+    for path in sorted(paths):
+        missing = [f for f in fields[:3] if not docs[path].get(f)]
+        if missing:
+            report['missing'].append({'path':path,'missing':missing,'expected_hash':docs[path]['hash']})
+    if json_output:
+        print(json.dumps(report,ensure_ascii=False,indent=2))
+    else:
+        print(f'元数据检查: {len(paths)} 个有效/选定条目（全部 {len(docs)}）；不调用 API')
+        print(' / '.join(f'{f}: {report["coverage"][f]}/{len(paths)}' for f in fields))
+        print('verified_at 是可选核实记录，不因补摘要而自动刷新。')
+        for row in report['missing'][:limit]:
+            print(row['path']+'  缺少: '+', '.join(row['missing']))
+        if len(report['missing'])>limit:
+            print(f'另有 {len(report["missing"])-limit} 条；--json 输出完整清单。')
+    return report
+
+
+def body_hash(doc):
+    return hashlib.sha256(doc['body'].replace('\r\n','\n').encode('utf-8')).hexdigest()
+
+
+def cmd_handoff(refs, max_chars=6000):
+    if not 512<=max_chars<=16000:
+        raise ValueError('handoff max-chars 需在 512 到 16000 之间')
+    keys = list(dict.fromkeys(reference(ref) for ref in refs))
+    if not keys or len(keys)>5:
+        raise ValueError('handoff 需要 1 到 5 个显式选择的记忆条目')
+    docs = documents()
+    active = eligible(docs)
+    entries = []
+    for key in keys:
+        if key not in active:
+            raise ValueError(f'记忆不存在或已过时，请重新检索: {key}')
+        doc = docs[key]
+        entries.append({'key':key,'sha256':doc['hash'],'text':doc['text']})
+    packet = {'schema_version':1,'kind':'memory-handoff','project_root':ROOT,
+              'memory_dir':MEM_DIR,'created_at':now().isoformat(),
+              'note':'主控显式选择的历史原文；文件哈希只验证内容新鲜度，不证明结论正确。',
+              'entries':entries}
+    rendered = json.dumps(packet,ensure_ascii=False,indent=2)
+    if len(rendered)>max_chars:
+        raise ValueError('记忆包超出总字符预算；减少条目或显式提高 --max-chars（最多 16000），不会截断原文')
+    print(rendered)
+    return packet
+
+
+def evaluation_cases(path, docs):
+    data = json.loads(Path(path).read_text(encoding='utf-8-sig'))
+    if not isinstance(data,dict) or data.get('schema_version')!=1:
+        raise ValueError('评测集需要 schema_version: 1 和 cases 数组')
+    cases = data.get('cases')
+    if not isinstance(cases,list) or not 1<=len(cases)<=1000:
+        raise ValueError('评测集需要 1-1000 个问题')
+    ids, validated = set(), []
+    for case in cases:
+        if not isinstance(case,dict):
+            raise ValueError('每个评测问题须为对象')
+        identity, query = case.get('id'), case.get('query')
+        if not isinstance(identity,str) or not identity.strip() or identity in ids:
+            raise ValueError('评测 id 须非空且唯一')
+        ids.add(identity)
+        if not isinstance(query,str) or not query.strip() or len(query)>2000:
+            raise ValueError(f'{identity}: query 须为 1-2000 字符')
+        no_answer, expected, forbidden = case.get('no_answer',False), case.get('expected',[]), case.get('forbidden',[])
+        if type(no_answer) is not bool or any(not isinstance(v,list) or any(not isinstance(p,str) for p in v)
+                                               for v in (expected,forbidden)):
+            raise ValueError(f'{identity}: 无效的 expected/forbidden/no_answer')
+        expected, forbidden = [reference(p) for p in expected], [reference(p) for p in forbidden]
+        if len(set(expected))!=len(expected) or bool(expected)==no_answer or set(expected)&set(forbidden):
+            raise ValueError(f'{identity}: 有答案问题需要 expected，无答案问题不能指定 expected；标签不得重复或冲突')
+        scope = case.get('scope')
+        if scope is not None and (not isinstance(scope,str) or not scope.strip()):
+            raise ValueError(f'{identity}: scope 须为非空字符串')
+        reason = case.get('reason','')
+        if not isinstance(reason,str) or not reason.strip():
+            raise ValueError(f'{identity}: 请记录人工核对原文后的标签依据 reason')
+        evidence = case.get('evidence',{})
+        if not isinstance(evidence,dict) or set(evidence)!=set(expected):
+            raise ValueError(f'{identity}: 每个 expected 需要 evidence（正文哈希与原文摘录）')
+        for target in expected:
+            if target not in docs or target not in eligible(docs) or (scope is not None and docs[target].get('scope')!=scope):
+                raise ValueError(f'{identity}: 标签目标不存在、已过时或不在范围内: {target}')
+            item = evidence[target]
+            if not isinstance(item,dict) or item.get('body_sha256')!=body_hash(docs[target]):
+                raise ValueError(f'{identity}: 标签正文已变化，请重新核对: {target}')
+            quotes = item.get('contains')
+            if not isinstance(quotes,list) or not quotes or any(not isinstance(q,str) or not q or q not in docs[target]['body'] for q in quotes):
+                raise ValueError(f'{identity}: 依据摘录与原文不符: {target}')
+        validated.append(dict(case,query=query.strip(),expected=expected,forbidden=forbidden,no_answer=no_answer))
+    return validated
+
+
+def cmd_eval(cases_file, report=None, k=3, mode='local', max_chars=DEFAULT_MAX_CHARS,
+             no_rerank=False, rerank_limit=DEFAULT_RERANK_LIMIT, min_vector_score=None,
+             rerank_scale=RERANK_SCALE, min_rerank_score=None, no_cache=False):
+    """Evaluate actual corpus labels; default local and never build an index implicitly."""
+    docs = documents()
+    cases = evaluation_cases(cases_file,docs)  # Validate every label before any API call.
+    if report and Path(report).resolve().is_relative_to(Path(MEM_DIR).resolve()):
+        raise ValueError('评测报告请保存在 memory/ 之外，避免报告变成记忆')
+    scores, timings, pipelines = [], [], {}
+    corpus = {p:d['hash'] for p,d in docs.items()}
+    for case in cases:
+        started = time.perf_counter()
+        result = search_result(case['query'],k,False,no_rerank,mode,max_chars,rerank_limit,
+                               case.get('scope'),min_vector_score,rerank_scale,min_rerank_score,no_cache)
+        if {p:d['hash'] for p,d in result['docs'].items()}!=corpus:
+            raise ValueError('评测期间记忆已变化；本次结果未发布，请重新运行')
+        _, _, visible = format_search(result,k,max_chars)
+        accepted = visible if not result['abstain'] else []
+        ranks = [i+1 for i,p in enumerate(accepted) if p in case['expected']]
+        pipelines[result['kind']] = pipelines.get(result['kind'],0)+1
+        elapsed = (time.perf_counter()-started)*1000
+        timings.append(elapsed)
+        scores.append({'id':case['id'],'query':case['query'],'expected':case['expected'],
+                       'visible':visible,'pipeline':result['kind'],'abstained':result['abstain'],
+                       'reranked':result['reranked'],'index':result['index'],
+                       'hit':bool(ranks),'reciprocal_rank':1/min(ranks) if ranks else 0,
+                       'recall':len(ranks)/len(case['expected']) if case['expected'] else None,
+                       'no_answer':case['no_answer'],
+                       'no_answer_candidates':case['no_answer'] and bool(result['rows']) and not result['abstain'],
+                       'forbidden_hits':[p for p in visible if p in case['forbidden']],
+                       'budget_hidden':bool(result['rows']) and not visible,
+                       'diagnostics':result['diagnostics'],'latency_ms':round(elapsed,3)})
+    if {p:d['hash'] for p,d in documents().items()}!=corpus:
+        raise ValueError('评测期间记忆已变化；本次结果未发布，请重新运行')
+    positives, negatives = [r for r in scores if not r['no_answer']], [r for r in scores if r['no_answer']]
+    ordered = sorted(timings)
+    metrics = {'cases':len(scores),'answerable':len(positives),'no_answer':len(negatives),
+               'hit_at_k':sum(r['hit'] for r in positives)/len(positives) if positives else None,
+               'mrr':sum(r['reciprocal_rank'] for r in positives)/len(positives) if positives else None,
+               'recall_at_k':sum(r['recall'] for r in positives)/len(positives) if positives else None,
+               'no_answer_candidate_rate':sum(r['no_answer_candidates'] for r in negatives)/len(negatives) if negatives else None,
+               'forbidden_cases':sum(bool(r['forbidden_hits']) for r in scores),
+               'budget_hidden_cases':sum(r['budget_hidden'] for r in scores),
+               'reranked_cases':sum(r['reranked'] for r in scores),
+               'latency_ms_p50':round(ordered[math.ceil(len(ordered)*.5)-1],3),
+               'latency_ms_p95':round(ordered[math.ceil(len(ordered)*.95)-1],3)}
+    result = {'schema_version':1,'tool_version':VERSION,'created_at':now().isoformat(),
+              'settings':{'mode':mode,'k':k,'max_chars':max_chars,'no_rerank':no_rerank,
+                          'rerank_limit':rerank_limit,'min_vector_score':min_vector_score,
+                          'rerank_scale':rerank_scale,'min_rerank_score':min_rerank_score,
+                          'embed_model':EMBED_MODEL,'rerank_model':RERANK_MODEL},
+              'corpus_sha256':hashlib.sha256(json.dumps(corpus,sort_keys=True).encode('utf-8')).hexdigest(),
+              'metrics':metrics,'pipelines':pipelines,'results':scores}
+    if report:
+        destination = Path(report).expanduser().resolve()
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        atomic_write(destination,json.dumps(result,ensure_ascii=False,indent=2)+'\n')
+    print(json.dumps({'metrics':metrics,'pipelines':pipelines},ensure_ascii=False,indent=2))
+    print('命中率按实际展示预算计算；无答案候选率是未弃权候选比例，不是回答准确率。')
+    if not all(r['reranked'] for r in scores):
+        print('包含本地/未重排/降级/部分索引检索；本结果不能当作完整云端模型准确率。')
+    if report:
+        print('完整报告: '+str(destination))
+    return result
+
+
 def cmd_outdated(months=6):
     if months<1:
         raise ValueError('months 必须大于 0')
@@ -883,7 +1232,10 @@ def atomic_write(path, text):
     path = Path(path)
     temp = path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
     try:
-        temp.write_text(text,encoding='utf-8',newline='\n')
+        if isinstance(text,bytes):
+            temp.write_bytes(text)
+        else:
+            temp.write_text(text,encoding='utf-8',newline='\n')
         os.replace(temp,path)
     finally:
         temp.unlink(missing_ok=True)
@@ -937,6 +1289,7 @@ def memory_identity(kind,title,summary,body,scope='',source='',verified_at='',su
 
 
 def cmd_add(kind,title,summary,body_file,supersedes=None,scope='',source='',verified_at='',no_dedupe=False):
+    require_controller('add/correction')
     title, summary = title.strip(), summary.strip()
     if not title or not summary or '\n' in title or '\n' in summary:
         raise ValueError('标题和摘要必须非空且单行')
@@ -1013,6 +1366,7 @@ def cmd_add(kind,title,summary,body_file,supersedes=None,scope='',source='',veri
 
 
 def cmd_init(target):
+    require_controller('init')
     import shutil
     target = Path(target).expanduser().resolve()
     if not target.is_dir():
@@ -1042,7 +1396,8 @@ def cmd_doctor():
     try:
         known, rows = cached()
         if not fresh(docs,known):
-            issues.append('索引未同步/格式模型变化: reindex')
+            coverage = index_coverage(docs,known)
+            issues.append(f'索引部分/未同步: {coverage["current"]}/{coverage["total"]} 文件向量可复用，{coverage["pending"]} 待更新；执行 reindex')
     except sqlite3.Error:
         issues.append('索引旧格式/损坏: reindex（必要时 --force）')
         known, rows = {}, []
@@ -1090,8 +1445,23 @@ def cmd_stats():
     except sqlite3.Error:
         known, rows = {}, []
     print(f'mem {VERSION}: {len(docs)} 记忆文件 / 索引 {len(known)} 文件 {len(rows)} 段')
-    print('索引新鲜度: '+('已同步' if fresh(docs,known) else '未同步（search 使用 Markdown）'))
+    coverage = index_coverage(docs,known)
+    print('索引新鲜度: '+('已同步' if fresh(docs,known) else
+          f'部分/未同步（{coverage["current"]}/{coverage["total"]} 文件可复用向量；其余用当前 Markdown）'))
     print(f'模型: {EMBED_MODEL} + {RERANK_MODEL} @ {BASE_URL}')
+
+
+def search_options(s, default_mode='auto', allow_scope=True):
+    s.add_argument('-k',type=int,default=3)
+    s.add_argument('--no-rerank',action='store_true')
+    s.add_argument('--mode',choices=('auto','local','hybrid'),default=default_mode)
+    s.add_argument('--max-chars',type=int,default=DEFAULT_MAX_CHARS)
+    s.add_argument('--rerank-limit',type=int,default=DEFAULT_RERANK_LIMIT)
+    if allow_scope:
+        s.add_argument('--scope')
+    s.add_argument('--min-vector-score',type=float)
+    s.add_argument('--rerank-scale',choices=('probability','logit'),default=RERANK_SCALE)
+    s.add_argument('--min-rerank-score',type=float); s.add_argument('--no-cache',action='store_true')
 
 
 def main():
@@ -1100,18 +1470,25 @@ def main():
     parser.add_argument('--version',action='version',version=VERSION)
     sub = parser.add_subparsers(dest='cmd',required=True)
     r = sub.add_parser('reindex'); r.add_argument('--force',action='store_true'); r.add_argument('--local',action='store_true')
-    s = sub.add_parser('search'); s.add_argument('query'); s.add_argument('-k',type=int,default=3)
-    s.add_argument('--include-outdated',action='store_true'); s.add_argument('--no-rerank',action='store_true')
-    s.add_argument('--mode',choices=('auto','local','hybrid'),default='auto')
-    s.add_argument('--max-chars',type=int,default=DEFAULT_MAX_CHARS)
-    s.add_argument('--rerank-limit',type=int,default=DEFAULT_RERANK_LIMIT)
-    s.add_argument('--scope'); s.add_argument('--min-vector-score',type=float)
-    s.add_argument('--rerank-scale',choices=('probability','logit'),default=RERANK_SCALE)
-    s.add_argument('--min-rerank-score',type=float); s.add_argument('--no-cache',action='store_true')
+    s = sub.add_parser('search'); s.add_argument('query'); s.add_argument('--include-outdated',action='store_true')
+    search_options(s)
+    e = sub.add_parser('eval',help='基于实际 Markdown 与已核对标签评测；默认 local')
+    e.add_argument('cases_file'); e.add_argument('--report')
+    search_options(e,'local',False)
+    au = sub.add_parser('audit',help='离线检查旧记忆元数据')
+    au.add_argument('--limit',type=int,default=20); au.add_argument('--json',action='store_true')
+    au.add_argument('--include-outdated',action='store_true')
+    an = sub.add_parser('annotate',help='预览/补充元数据，保留正文与原日期')
+    an.add_argument('path'); an.add_argument('--apply',action='store_true'); an.add_argument('--expected-hash')
+    for field in ('summary','scope','source','verified-at'):
+        an.add_argument('--'+field)
     o = sub.add_parser('outdated'); o.add_argument('--months',type=int,default=6)
     sub.add_parser('stats'); sub.add_parser('doctor')
     i = sub.add_parser('init'); i.add_argument('target')
     h = sub.add_parser('show'); h.add_argument('path'); h.add_argument('--grep'); h.add_argument('-C','--context',type=int,default=0); h.add_argument('--lines'); h.add_argument('--section'); h.add_argument('--max-chars',type=int,default=200000)
+    handoff = sub.add_parser('handoff',help='将主控显式选择的有效记忆及哈希交给子智能体；JSON 标准输出')
+    handoff.add_argument('--ref',action='append',required=True)
+    handoff.add_argument('--max-chars',type=int,default=6000)
     a = sub.add_parser('add'); a.add_argument('--type',choices=('fact','decision','howto','correction'),required=True)
     for name in ('title','summary','body-file'):
         a.add_argument('--'+name,required=True)
@@ -1129,6 +1506,12 @@ def main():
         elif args.cmd=='add': cmd_add(args.type,args.title,args.summary,args.body_file,args.supersedes,
             args.scope,args.source,args.verified_at,args.no_dedupe)
         elif args.cmd=='show': cmd_show(args.path,args.grep,args.context,args.lines,args.section,args.max_chars)
+        elif args.cmd=='handoff': cmd_handoff(args.ref,args.max_chars)
+        elif args.cmd=='audit': cmd_audit(args.limit,args.json,args.include_outdated)
+        elif args.cmd=='annotate': cmd_annotate(args.path,args.summary,args.scope,args.source,args.verified_at,
+                                               args.expected_hash,args.apply)
+        elif args.cmd=='eval': cmd_eval(args.cases_file,args.report,args.k,args.mode,args.max_chars,args.no_rerank,
+                                        args.rerank_limit,args.min_vector_score,args.rerank_scale,args.min_rerank_score,args.no_cache)
         elif args.cmd=='doctor': return 1 if cmd_doctor() else 0
         else: cmd_stats()
         return 0
